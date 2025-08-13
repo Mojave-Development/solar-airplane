@@ -13,13 +13,16 @@ mission_date = 100
 lat = 37.398928
 
 # --- Aerodynamic ---
+# Airfoils
 wing_airfoil = asb.Airfoil("sd7037")
 tail_airfoil = asb.Airfoil("naca0010")
 
+# Main wing
+polyhedral_angle = 10
+
+# Vstab dimensions
 vstab_span = 0.3
 vstab_chordlen = 0.15
-
-polyhedral_angle = 10
 
 # --- Power ---
 N = 100  # Number of discretization points
@@ -30,18 +33,21 @@ solar_cell_efficiency = 0.243 * 0.9 # 24.3% efficient
 
 # ---------- VARIABLES ----------
 # --- Aerodynamic ---
-airspeed = opti.variable(init_guess=15, lower_bound=5, upper_bound=30, scale=5)
-wingspan = opti.variable(init_guess=3.4, lower_bound=2, upper_bound=30, scale=2)
-chordlen = opti.variable(init_guess=0.26, scale=1)
-struct_defined_aoa = opti.variable(init_guess=2, lower_bound=0, upper_bound=7, scale=1)
+airspeed = opti.variable(init_guess=15, lower_bound=5, upper_bound=30, scale=5, category="airspeed")
 
-hstab_span = opti.variable(init_guess=0.5, lower_bound=0.3, upper_bound=2, scale=0.5)
-hstab_chordlen = opti.variable(init_guess=0.2, lower_bound=0.15, upper_bound=0.4, scale=0.2)
-hstab_aoa = opti.variable(init_guess=-5, lower_bound=-5, upper_bound=3)
+# Main wing
+wingspan = opti.variable(init_guess=3.4, lower_bound=2, upper_bound=7, scale=2, category="wingspan")
+chordlen = opti.variable(init_guess=0.3, scale=1, category="chordlen")
+struct_defined_aoa = opti.variable(init_guess=2, lower_bound=0, upper_bound=7, scale=1, category="struct_aoa")
+cg_le_dist = opti.variable(init_guess=0.05, lower_bound=0, scale=1, category="cg_le_dist")
 
-# cg_le_dist = opti.variable(init_guess=0, lower_bound=0, scale=1)
+# Hstab
+hstab_span = opti.variable(init_guess=0.5, lower_bound=0.3, upper_bound=1, scale=0.5, category="hstab_span")
+hstab_chordlen = opti.variable(init_guess=0.2, lower_bound=0.15, upper_bound=0.4, scale=0.2, category="hstab_chordlen")
+hstab_aoa = opti.variable(init_guess=-5, lower_bound=-5, upper_bound=5, category="hstab_aoa")
 
-boom_length = opti.variable(init_guess=2, lower_bound=1.5, upper_bound=4, scale=1)
+# Body
+boom_length = opti.variable(init_guess=2, lower_bound=1.0, upper_bound=4, scale=1, category="boom_length")
 
 # --- Power ---
 n_solar_panels = opti.variable(init_guess=40, lower_bound=10, category="power", scale=10)
@@ -236,7 +242,7 @@ weight = 9.81 * (
 )
 
 # ---------- STABILITY ----------
-# static_margin = (cg_le_dist - aero["x_np"]) / main_wing.mean_aerodynamic_chord()
+static_margin = (cg_le_dist - aero["x_np"]) / np.softmax(1e-6, main_wing.mean_aerodynamic_chord(), hardness=10)
 
 
 # ---------- CONSTRAINTS ----------
@@ -246,13 +252,13 @@ opti.subject_to(wing_airfoil.max_thickness() * chordlen > 0.030)  # must accomod
 opti.subject_to(wingspan > 0.13 * n_solar_panels)  # Must be able to fit all of our solar panels 13cm each
 
 # --- Stability ---
-# opti.subject_to(cg_le_dist <= 0.25 * chordlen)
+opti.subject_to(cg_le_dist <= 0.25 * chordlen)
 # opti.subject_to(static_margin > 0.1)
 # opti.subject_to(static_margin < 0.5)
 
 # --- Power ---
 opti.subject_to([
-    battery_states > 0,
+    battery_states > 50,
     battery_states[0] == battery_cap,
     battery_states[N-1] == battery_cap
 ])
