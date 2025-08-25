@@ -1,6 +1,7 @@
 import aerosandbox as asb
 import aerosandbox.numpy as np
 from aerosandbox.library import power_solar
+from aerosandbox.atmosphere import Atmosphere
 from lib.aero import calculate_skin_friction
 
 
@@ -11,6 +12,11 @@ opti=asb.Opti(cache_filename="output/soln1.json")
 # --- Mission ---
 mission_date = 100
 lat = 37.398928
+
+temperature_high = 278 # in Kelvin --> this is 60 deg F addition to ISA temperature at 0 meter MSL
+operating_altitude = 1200 # in meters
+operating_atm = Atmosphere(operating_altitude, temperature_deviation=temperature_high)
+
 
 # --- Aerodynamic ---
 # Airfoils
@@ -179,6 +185,7 @@ airplane = asb.Airplane(
 vlm = asb.VortexLatticeMethod(
     airplane=airplane,
     op_point=asb.OperatingPoint(
+        atmosphere=operating_atm, # FIX!
         velocity=airspeed,  # m/s
     ),
 )
@@ -206,7 +213,7 @@ for i in range(N-1):
         latitude=lat,
         day_of_year=mission_date,
         time=time[i],
-        altitude=400,
+        altitude=operating_altitude,
         panel_azimuth_angle=0,
         panel_tilt_angle=0
     ) # W / m^2
@@ -246,6 +253,8 @@ static_margin = (cg_le_dist - aero["x_np"]) / np.softmax(1e-6, main_wing.mean_ae
 
 
 # ---------- CONSTRAINTS ----------
+# --- Mission
+opti.subject_to(weight <= 7 * 9.81)
 # --- Aerodynamic ---
 opti.subject_to(aero["L"] == weight)
 opti.subject_to(wing_airfoil.max_thickness() * chordlen > 0.030)  # must accomodate main spar (22mm)
