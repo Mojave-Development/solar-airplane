@@ -3,9 +3,10 @@ import aerosandbox.numpy as np
 from aerosandbox.library import power_solar
 from aerosandbox.atmosphere import Atmosphere
 from lib.aero import calculate_skin_friction
+import os
 
 
-opti=asb.Opti(cache_filename="output/soln1.json")
+opti=asb.Opti(cache_filename=os.path.join(os.getcwd(),"output","soln1.json"))
 
 
 # ---------- CONSTANTS ----------
@@ -20,7 +21,7 @@ operating_atm = Atmosphere(operating_altitude, temperature_deviation=temperature
 
 # --- Aerodynamic ---
 # Airfoils
-wing_airfoil = asb.Airfoil("sd7037")
+wing_airfoil = asb.Airfoil("s1210")
 tail_airfoil = asb.Airfoil("naca0010")
 
 # Main wing
@@ -44,16 +45,16 @@ airspeed = opti.variable(init_guess=15, lower_bound=5, upper_bound=30, scale=5, 
 # Main wing
 wingspan = opti.variable(init_guess=3.4, lower_bound=2, upper_bound=7, scale=2, category="wingspan")
 chordlen = opti.variable(init_guess=0.3, scale=1, category="chordlen")
-struct_defined_aoa = opti.variable(init_guess=2, lower_bound=0, upper_bound=7, scale=1, category="struct_aoa")
+struct_defined_aoa = opti.variable(init_guess=2, lower_bound=0, upper_bound=2, scale=1, category="struct_aoa")
 cg_le_dist = opti.variable(init_guess=0.05, lower_bound=0, scale=1, category="cg_le_dist")
 
 # Hstab
-hstab_span = opti.variable(init_guess=0.5, lower_bound=0.3, upper_bound=1, scale=0.5, category="hstab_span")
-hstab_chordlen = opti.variable(init_guess=0.2, lower_bound=0.15, upper_bound=0.4, scale=0.2, category="hstab_chordlen")
+hstab_span = opti.variable(init_guess=0.5, lower_bound=0.3*wingspan, upper_bound=0.75*wingspan, scale=1, category="hstab_span")
+hstab_chordlen = opti.variable(init_guess=0.2, lower_bound=0.15, upper_bound=0.4, scale=0.5, category="hstab_chordlen")
 hstab_aoa = opti.variable(init_guess=-5, lower_bound=-5, upper_bound=5, category="hstab_aoa")
 
 # Body
-boom_length = opti.variable(init_guess=2, lower_bound=1.0, upper_bound=4, scale=1, category="boom_length")
+boom_length = opti.variable(init_guess=2, lower_bound=0.3*wingspan, upper_bound=1*wingspan, scale=1, category="boom_length")
 
 # --- Power ---
 n_solar_panels = opti.variable(init_guess=40, lower_bound=10, category="power", scale=10)
@@ -110,7 +111,7 @@ hor_stabilizer = asb.Wing(
     ],
 ).translate([boom_length, 0, 0])
 
-vert_stabilizer = asb.Wing(
+vert_stabilizer_left = asb.Wing(
     name="Vertical Stabilizer",
     symmetric=False,
     xsecs=[
@@ -127,27 +128,32 @@ vert_stabilizer = asb.Wing(
             airfoil=tail_airfoil,
         ),
     ],
-).translate([boom_length + hstab_chordlen, 0, 0])
+).translate([boom_length + hstab_chordlen, -hstab_span/2, 0])
 
-main_fuselage = asb.Fuselage(  # main fuselage
-    name="Fuselage",
+vert_stabilizer_right = asb.Wing(
+    name="Vertical Stabilizer",
+    symmetric=False,
     xsecs=[
-        asb.FuselageXSec(
-            xyz_c=[0.5 * xi, 0, 0],
-            radius=0.6
-            * asb.Airfoil("dae51").local_thickness(
-                x_over_c=xi
-            ),  # half a meter fuselage. Starting at LE and 0.5m forward
-        )
-        for xi in np.cosspace(0, 1, 30)
+        asb.WingXSec(
+            xyz_le=[0, 0, 0],
+            chord=vstab_chordlen,
+            twist=0,
+            airfoil=tail_airfoil,
+        ),
+        asb.WingXSec(
+            xyz_le=[0, 0, vstab_span],
+            chord=vstab_chordlen,
+            twist=0,
+            airfoil=tail_airfoil,
+        ),
     ],
-).translate([-0.5, 0, 0])
+).translate([boom_length + hstab_chordlen, hstab_span/2, 0])
 
 left_pod = asb.Fuselage(  # left pod fuselage
     name="Fuselage",
     xsecs=[
         asb.FuselageXSec(
-            xyz_c=[0.2 * xi, 0.75, -0.02],
+            xyz_c=[0.2 * xi, -hstab_span/2, -0.02],
             radius=0.4
             * asb.Airfoil("dae51").local_thickness(
                 x_over_c=xi
@@ -161,7 +167,7 @@ right_pod = asb.Fuselage(  # right pod fuselage
     name="Fuselage",
     xsecs=[
         asb.FuselageXSec(
-            xyz_c=[0.2 * xi, -0.75, -0.02],
+            xyz_c=[0.2 * xi, hstab_span/2, -0.02],
             radius=0.4
             * asb.Airfoil("dae51").local_thickness(
                 x_over_c=xi
@@ -176,8 +182,8 @@ right_pod = asb.Fuselage(  # right pod fuselage
 airplane = asb.Airplane(
     name="rev 6",
     xyz_ref=[0.1 * chordlen, 0, 0],  # CG location
-    wings=[main_wing, hor_stabilizer, vert_stabilizer],
-    fuselages=[main_fuselage, left_pod, right_pod],
+    wings=[main_wing, hor_stabilizer, vert_stabilizer_left, vert_stabilizer_right],
+    fuselages=[ left_pod, right_pod],
 )
 
 
@@ -195,8 +201,7 @@ aero = vlm.run_with_stability_derivatives()  # Returns a dictionary
 CD0 = (
     calculate_skin_friction(chordlen, airspeed) * main_wing.area(type="wetted") / main_wing.area()
     + calculate_skin_friction(hstab_chordlen, airspeed) * hor_stabilizer.area(type="wetted") / main_wing.area()
-    + calculate_skin_friction(vstab_chordlen, airspeed) * vert_stabilizer.area(type="wetted") / main_wing.area()
-    + calculate_skin_friction(0.5, airspeed) * main_fuselage.area_wetted() / main_wing.area()
+    + 2* calculate_skin_friction(vstab_chordlen, airspeed) * vert_stabilizer_left.area(type="wetted") / main_wing.area()
     + 2 * calculate_skin_friction(0.2, airspeed) * left_pod.area_wetted() / main_wing.area()
 )
 
@@ -234,7 +239,7 @@ num_packs = battery_cap / (5 * 6 * 3.7) # 5 ah, 6 cells, 3.7 V/cell
 battery_mass = num_packs * 0.450
 
 # --- Structures ---
-foam_volume = main_wing.volume() + hor_stabilizer.volume() + vert_stabilizer.volume()
+foam_volume = main_wing.volume() + hor_stabilizer.volume() + 2*vert_stabilizer_left.volume()
 foam_mass = foam_volume * 30.0  # foam 30kg.m^2
 spar_mass = (wingspan / 2 + boom_length) * 0.09  # 90g/m carbon spar 22mm
 fuselages_mass = 1.0  # 1kg for all fuselage pods
@@ -266,11 +271,9 @@ opti.subject_to(cg_le_dist <= 0.25 * chordlen)
 # opti.subject_to(static_margin < 0.5)
 
 # --- Power ---
-opti.subject_to([
-    battery_states > 50,
-    battery_states[0] == battery_cap,
-    battery_states[N-1] == battery_cap
-])
+opti.subject_to(battery_states > 50) #Sorry for splitting these up. Windows quirk - CRJ 26AUG2025
+opti.subject_to(battery_states[0] == battery_cap)
+opti.subject_to(battery_states[N-1] == battery_cap)
 
 
 # ---------- SOLVE ----------
