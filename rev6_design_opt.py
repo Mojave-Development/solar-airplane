@@ -69,8 +69,8 @@ motor_kv = opti.variable(init_guess=250, lower_bound=150, upper_bound=350, scale
 
 # Avionics
 n_solar_panels = opti.variable(init_guess=40, lower_bound=10, category="n_solar_panels", scale=40)
-battery_capacity = opti.variable(init_guess=1500, lower_bound=0, category="battery_capacity", scale=450) # Initial battery energy in Wh. 5Ah*6cells*3.7V/cell=111Wh
-battery_states_nondim = opti.variable(n_vars=N, init_guess=0.5, category="battery_states", scale=0.5)
+battery_capacity = opti.variable(init_guess=450, lower_bound=100, category="battery_capacity", scale=150)  # initial battery energy in Wh
+battery_states = opti.variable(n_vars=N, init_guess=500, category="battery_states", scale=100)
 
 
 ### GEOMETRIES
@@ -258,10 +258,10 @@ for i in range(N-1):
     power_generated = solar_flux * solar_area * solar_cell_efficiency / energy_generation_margin
     power_used = (power_out_propulsion_shaft + 8)  # 8w to run avionics
     net_energy = (power_generated - power_used) * (dt / 3600)  # Wh
-    net_energy_nondim = net_energy / battery_capacity
+    # net_energy_nondim = net_energy / battery_capacity
 
-    battery_update_nondim = np.softmin(battery_states_nondim[i] + net_energy_nondim, battery_capacity, hardness=10)
-    opti.subject_to(battery_states_nondim[i+1] == battery_update_nondim)
+    battery_update = np.softmin(battery_states[i] + net_energy, battery_capacity, hardness=10)
+    opti.subject_to(battery_states[i+1] == battery_update)
 
 
 ### WEIGHT
@@ -334,8 +334,8 @@ opti.subject_to(cg_le_dist <= 0.25 * chordlen)
 
 # Power
 opti.subject_to([
-    battery_states_nondim > 0,
-    battery_states_nondim < allowable_battery_depth_of_discharge
+    battery_states > battery_capacity * (1-allowable_battery_depth_of_discharge),
+    battery_states[0] <= battery_states[N-1]
 ])
 
 
