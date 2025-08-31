@@ -323,7 +323,7 @@ opti.subject_to(motor_kv >= 150)
 
 # Aerodynamic
 opti.subject_to(aero["L"] >= togw_design * 9.81)
-opti.subject_to(chordlen >= solar_panels_n_rows * 0.13)
+opti.subject_to(chordlen >= solar_panels_n_rows * 0.13 + 0.1) # ! Justify this addition of 0.1
 opti.subject_to(wing_airfoil.max_thickness() * chordlen >= 0.030)  # must accomodate main spar (22mm)
 opti.subject_to(wingspan >= 0.13 * solar_panels_n / solar_panels_n_rows)  # Must be able to fit all of our solar panels 13cm each
 
@@ -365,8 +365,9 @@ print("Total lift:", s(aero["L"]))
 print("Total drag:", s(aero["D"]))
 
 print("\n--- Wing Dimensions ---")
-print("Wingspan:", s(wingspan))
-print("Chordlen:", s(chordlen))
+print("Main wing span:", s(wingspan))
+print("Main wing chord length:", s(chordlen))
+print("Main wing AR:", s(main_wing.aspect_ratio()))
 print("Struct defined AoA: ", s(struct_defined_aoa))
 print("Hstab AoA:", s(hstab_aoa))
 print("Hstab span:", s(hstab_span))
