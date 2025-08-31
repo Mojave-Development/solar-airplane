@@ -45,7 +45,7 @@ allowable_battery_depth_of_discharge = 0.85  # How much of the battery can you a
 ### VARIABLES
 # Performance
 airspeed = opti.variable(init_guess=15, lower_bound=5, upper_bound=30, scale=5, category="airspeed")
-togw_design = opti.variable(init_guess=7, lower_bound=1e-3, upper_bound=togw_max, category="togw_max")
+togw_design = opti.variable(init_guess=4, lower_bound=1e-3, upper_bound=togw_max, category="togw_max")
 thrust_cruise = opti.variable(init_guess=4, lower_bound=0, scale=2, category="thrust_cruise")
 power_out_max = opti.variable(init_guess=500, lower_bound=25*16, scale=100, category="power_out_max")
 
@@ -224,6 +224,8 @@ propeller_rads_per_sec = propeller_tip_mach * Atmosphere(altitude=1100).speed_of
 propeller_rpm = propeller_rads_per_sec * 30 / np.pi
 motor_kv = propeller_rpm / battery_voltage
 
+thrust_climb = togw_design * 9.81 * np.sind(45) + aero["D"]
+
 
 ### POWER
 for i in range(N-1):
@@ -278,13 +280,11 @@ mass_motor_raw = propulsion_electric.mass_motor_electric(
     voltage=battery_voltage
 ) * propeller_n
 mass_motors_mounted = mass_motor_raw * 2
-mass_esc = propulsion_electric.mass_ESC(max_power=power_out_max)
+mass_esc = propeller_n * propulsion_electric.mass_ESC(max_power=power_out_max)
 mass_propellers = propeller_n * propulsion_propeller.mass_hpa_propeller(
     diameter=propeller_diameter, 
     max_power=power_out_max
 )
-thrust_climb = togw_design*np.sind(45) + aero["D"]
-
 
 # Structures
 foam_volume = main_wing.volume() + hor_stabilizer.volume() + vert_stabilizer.volume()
@@ -306,8 +306,6 @@ total_mass = (
     mass_spar + mass_foam +
     mass_fuselages
 )
-total_weight = total_mass * 9.81
-
 
 ### STABILITY
 static_margin = (cg_le_dist - aero["x_np"]) / np.softmax(1e-6, main_wing.mean_aerodynamic_chord(), hardness=10)
@@ -318,13 +316,13 @@ static_margin = (cg_le_dist - aero["x_np"]) / np.softmax(1e-6, main_wing.mean_ae
 opti.subject_to(total_mass < togw_design)
 
 # Performance
-opti.subject_to(thrust_cruise > aero["D"])
-opti.subject_to(power_out_max > power_shaft_cruise)
-opti.subject_to(power_out_max > thrust_climb * airspeed)
-opti.subject_to(motor_kv > 150)
+opti.subject_to(thrust_cruise >= aero["D"])
+opti.subject_to(power_out_max >= power_shaft_cruise)
+opti.subject_to(power_out_max >= thrust_climb * airspeed)
+opti.subject_to(motor_kv >= 150)
 
 # Aerodynamic
-opti.subject_to(aero["L"] > togw_design)
+opti.subject_to(aero["L"] >= togw_design * 9.81)
 opti.subject_to(chordlen >= solar_panels_n_rows * 0.13)
 opti.subject_to(wing_airfoil.max_thickness() * chordlen >= 0.030)  # must accomodate main spar (22mm)
 opti.subject_to(wingspan >= 0.13 * solar_panels_n / solar_panels_n_rows)  # Must be able to fit all of our solar panels 13cm each
@@ -354,12 +352,15 @@ print("---Performance---")
 print("Airspeed:", s(airspeed))
 print("Thrust Force:", s(thrust_cruise))
 print("Power out max:", s(power_out_max))
-print("Mass", s(total_mass))
-print("Weight", s(total_weight))
+print("Mass:", s(total_mass))
+print("TOGW Max:", s(togw_max))
+print("TOGW Design:", s(togw_design))
+print("Weight:", s(togw_design * 9.81))
 
 print("\n--- Aerodynamics ---")
 print("CL", s(aero["CL"]))
 print("CD", s(aero["CD"]))
+print("L/D", s(aero["CL"]/aero["CD"]))
 print("Total lift:", s(aero["L"]))
 print("Total drag:", s(aero["D"]))
 
@@ -369,6 +370,7 @@ print("Chordlen:", s(chordlen))
 print("Struct defined AoA: ", s(struct_defined_aoa))
 print("Hstab AoA:", s(hstab_aoa))
 print("Hstab span:", s(hstab_span))
+print("Hstab chord:", s(hstab_chordlen))
 
 print("\n--- Structral Dimensions ---")
 print("cg_le_dist:", s(cg_le_dist))
@@ -380,6 +382,7 @@ print("Fuselage mass:", s(mass_fuselages))
 print("\n--- Power ---")
 print("Solar cells #:", s(solar_panels_n))
 print("Solar cell mass:", s(mass_solar_cells))
+print("Battery capacity:", s(battery_capacity))
 print("Battery mass:", s(mass_batteries))
 print("Battery pack #:", s(num_packs))
 print("Wire mass:", s(mass_wires))
@@ -393,8 +396,8 @@ print("Motor RPM:", s(motor_rpm))
 print("Motor KV", s(motor_kv))
 print("Propeller diameter:", s(propeller_diameter))
 print("Propeller mass:", s(mass_propellers))
-print("Motor mass:", s(mass_motor_raw))
-print("ESC mass:", s(mass_esc))
+print("Motors mass:", s(mass_motor_raw))
+print("ESCs mass:", s(mass_esc))
 
 
 # for k, v in aero.items():
