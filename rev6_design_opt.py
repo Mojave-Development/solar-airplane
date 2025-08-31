@@ -2,22 +2,20 @@ import aerosandbox as asb
 import aerosandbox.numpy as np
 from aerosandbox.library import power_solar, propulsion_electric, propulsion_propeller
 from aerosandbox.atmosphere import Atmosphere
-from lib.aero import calculate_skin_friction
 
 
 opti=asb.Opti(cache_filename="output/soln1.json")
 
 
 ### CONSTANTS
-## Mission
+# Mission
 mission_date = 100
-lat = 37.398928
-
+operating_lat = 37.398928
+togw_max = 7 # kg
 temperature_high = 278 # in Kelvin --> this is 60 deg F addition to ISA temperature at 0 meter MSL
 operating_altitude = 1200 # in meters
 operating_atm = Atmosphere(operating_altitude, temperature_deviation=temperature_high)
 
-## Aerodynamics
 # Airfoils
 wing_airfoil = asb.Airfoil("sd7037")
 tail_airfoil = asb.Airfoil("naca0010")
@@ -25,26 +23,31 @@ tail_airfoil = asb.Airfoil("naca0010")
 # Main wing
 polyhedral_angle = 10
 
-# Vstab dimensions
+# Vstab
 vstab_span = 0.3
 vstab_chordlen = 0.15
 
-## Power
+# Structural
+structural_mass_markup = 1.2
+
+# Power
 N = 180  # Number of discretization points
 time = np.linspace(0, 24 * 60 * 60, N)  # s
 dt = np.diff(time)[0]  # s
 battery_voltage = 22.2
-encapsulation_eff_hit = 0.1 # Estimated 10% efficieincy loss from encapsulation.
-solar_cell_efficiency = 0.243 * (1 - encapsulation_eff_hit)
-energy_generation_margin = opti.parameter(value=1.05)
-allowable_battery_depth_of_discharge = opti.parameter(value=0.85)  # How much of the battery can you actually use?
+solar_panels_n_rows = 2
+solar_encapsulation_eff_hit = 0.1 # Estimated 10% efficieincy loss from encapsulation.
+solar_cell_efficiency = 0.243 * (1 - solar_encapsulation_eff_hit)
+energy_generation_margin = 1.05
+allowable_battery_depth_of_discharge = 0.85  # How much of the battery can you actually use?
 
 
 ### VARIABLES
-## Performance
+# Performance
 airspeed = opti.variable(init_guess=15, lower_bound=5, upper_bound=30, scale=5, category="airspeed")
-thrust_force = opti.variable(init_guess=7, lower_bound=0, scale=7, category="thrust")
-power_out_max = opti.variable(init_guess=50, lower_bound=10, scale=50, category="power_out_max")
+togw_design = opti.variable(init_guess=7, lower_bound=1e-3, upper_bound=togw_max, category="togw_max")
+thrust_cruise = opti.variable(init_guess=4, lower_bound=0, scale=2, category="thrust_cruise")
+power_out_max = opti.variable(init_guess=500, lower_bound=25*16, scale=100, category="power_out_max")
 
 # Main wing
 wingspan = opti.variable(init_guess=6, lower_bound=2, upper_bound=7, scale=2, category="wingspan")
@@ -55,20 +58,18 @@ cg_le_dist = opti.variable(init_guess=0.05, lower_bound=0, scale=0.05, category=
 # Hstab
 hstab_span = opti.variable(init_guess=0.5, lower_bound=0.3, upper_bound=1, scale=0.5, category="hstab_span")
 hstab_chordlen = opti.variable(init_guess=0.2, lower_bound=0.15, upper_bound=0.4, scale=0.2, category="hstab_chordlen")
-hstab_aoa = opti.variable(init_guess=-5, lower_bound=-5, upper_bound=5, scale=5, category="hstab_aoa")
+hstab_aoa = opti.variable(init_guess=-5, lower_bound=-5, upper_bound=0, scale=5, category="hstab_aoa")
 
-# Body
+# Structural
 boom_length = opti.variable(init_guess=2, lower_bound=1.0, upper_bound=4, scale=2, category="boom_length")
 
-## Power
 # Propulsion
-n_propellers = opti.parameter(1)
+propeller_n = opti.parameter(2)
 propeller_diameter = opti.variable(init_guess=0.5, lower_bound=0.1, upper_bound=2, scale=1, category="propeller_diameter")
 motor_rpm = opti.variable(init_guess=4000, lower_bound=2000, upper_bound=10000, scale=4000, category="motor_rpm")
-motor_kv = opti.variable(init_guess=250, lower_bound=150, upper_bound=350, scale=250, category="motor_kv")
 
 # Avionics
-n_solar_panels = opti.variable(init_guess=40, lower_bound=10, category="n_solar_panels", scale=40)
+solar_panels_n = opti.variable(init_guess=40, lower_bound=10, category="solar_panels_n", scale=40)
 battery_capacity = opti.variable(init_guess=450, lower_bound=100, category="battery_capacity", scale=150)  # initial battery energy in Wh
 battery_states = opti.variable(n_vars=N, init_guess=500, category="battery_states", scale=100)
 
@@ -192,42 +193,26 @@ airplane = asb.Airplane(
 
 
 ### AERODYNAMICS
-vlm = asb.VortexLatticeMethod(
+vlm = asb.AeroBuildup(
     airplane=airplane,
     op_point=asb.OperatingPoint(
         atmosphere=operating_atm, # FIX!
         velocity=airspeed,  # m/s
     ),
 )
-# abu = asb.AeroBuildup(
-#     airplane=airplane,
-#     op_point=asb.OperatingPoint(
-#         operating_atm,
-#         airspeed
-#     )
-# )
-aero = vlm.run_with_stability_derivatives()  # Returns a dictionary
-# abu.run()
-
-# VLM does not calcualte parasitic drag, we must add this manually
-CD0 = (
-    calculate_skin_friction(chordlen, airspeed) * main_wing.area(type="wetted") / main_wing.area()
-    + calculate_skin_friction(hstab_chordlen, airspeed) * hor_stabilizer.area(type="wetted") / main_wing.area()
-    + calculate_skin_friction(vstab_chordlen, airspeed) * vert_stabilizer.area(type="wetted") / main_wing.area()
-    + calculate_skin_friction(0.5, airspeed) * main_fuselage.area_wetted() / main_wing.area()
-    + 2 * calculate_skin_friction(0.2, airspeed) * left_pod.area_wetted() / main_wing.area()
+aero = vlm.run_with_stability_derivatives(
+    alpha=True,
+    beta=True,
+    p=False,
+    q=False,
+    r=False
 )
-
-drag_parasite = 0.5 * 1.29 * airspeed**2 * main_wing.area() * CD0
-
-aero["CD_tot"] = aero["CD"] + CD0
-aero["D_tot"] = aero["D"] + drag_parasite
-aero["power"] = aero["D_tot"] * airspeed
+aero["power"] = aero["D"] * airspeed
 
 
 ### PROPULSION
-power_out_propulsion_shaft = propulsion_propeller.propeller_shaft_power_from_thrust(
-    thrust_force=thrust_force,
+power_shaft_cruise = propulsion_propeller.propeller_shaft_power_from_thrust(
+    thrust_force=thrust_cruise,
     area_propulsive=np.pi / 4 * propeller_diameter ** 2,
     airspeed=airspeed,
     rho=operating_atm.density(),
@@ -237,16 +222,13 @@ power_out_propulsion_shaft = propulsion_propeller.propeller_shaft_power_from_thr
 propeller_tip_mach = 0.36  # From Dongjoon, 4/30/20
 propeller_rads_per_sec = propeller_tip_mach * Atmosphere(altitude=1100).speed_of_sound() / (propeller_diameter / 2)
 propeller_rpm = propeller_rads_per_sec * 30 / np.pi
-
-motor_rads_per_sec = motor_rpm * 2 * np.pi / 60
-motor_torque_per_motor = power_out_propulsion_shaft / motor_rads_per_sec
 motor_kv = propeller_rpm / battery_voltage
 
 
 ### POWER
 for i in range(N-1):
     solar_flux = power_solar.solar_flux(
-        latitude=lat,
+        latitude=operating_lat,
         day_of_year=mission_date,
         time=time[i],
         altitude=operating_altitude,
@@ -254,20 +236,22 @@ for i in range(N-1):
         panel_tilt_angle=0
     ) # W / m^2
 
-    solar_area = n_solar_panels * 0.125**2 # m^2
+    solar_area = solar_panels_n * 0.125**2 # m^2
     power_generated = solar_flux * solar_area * solar_cell_efficiency / energy_generation_margin
-    power_used = (power_out_propulsion_shaft + 8)  # 8w to run avionics
+    power_used = (power_shaft_cruise + 8)  # 8w to run avionics
     net_energy = (power_generated - power_used) * (dt / 3600)  # Wh
-    # net_energy_nondim = net_energy / battery_capacity
 
     battery_update = np.softmin(battery_states[i] + net_energy, battery_capacity, hardness=10)
     opti.subject_to(battery_states[i+1] == battery_update)
 
 
-### WEIGHT
+### Mass
 # Power
-solar_cell_mass = 0.015 * n_solar_panels
-battery_mass = propulsion_electric.mass_battery_pack(battery_capacity)
+mass_solar_cells = 0.015 * solar_panels_n
+mass_batteries = propulsion_electric.mass_battery_pack(
+    battery_capacity_Wh=battery_capacity,
+    battery_pack_cell_fraction=0.9
+)
 num_packs = battery_capacity / (5 * 6 * 3.7) # 5 ah, 6 cells, 3.7 V/cell
 mass_wires = propulsion_electric.mass_wires(
     wire_length=wingspan / 2,
@@ -276,33 +260,53 @@ mass_wires = propulsion_electric.mass_wires(
     material="aluminum"
 )
 
+# Avionics
+mass_speedybee = .055
+mass_gps = 0.012
+mass_telemtry = 0.026
+mass_receiver = 0.018
+mass_power_board = 0.075 * 2 # 75g estimate for each power board
+mass_avionics = mass_speedybee + mass_gps + mass_telemtry + mass_receiver + mass_power_board
+
+# Actuators
+mass_servos = .02 * 4 # 20g a servo
+
 # Propulsion
 mass_motor_raw = propulsion_electric.mass_motor_electric(
-    max_power= power_out_max / n_propellers,
+    max_power= power_out_max / propeller_n,
     kv_rpm_volt=motor_kv,
     voltage=battery_voltage
-) * n_propellers
-mass_esc = propulsion_electric.mass_ESC(power_out_max)
-mass_propeller = propulsion_propeller.mass_hpa_propeller(propeller_diameter, power_out_max)
+) * propeller_n
+mass_motors_mounted = mass_motor_raw * 2
+mass_esc = propulsion_electric.mass_ESC(max_power=power_out_max)
+mass_propellers = propeller_n * propulsion_propeller.mass_hpa_propeller(
+    diameter=propeller_diameter, 
+    max_power=power_out_max
+)
+thrust_climb = togw_design*np.sind(45) + aero["D"]
+
 
 # Structures
 foam_volume = main_wing.volume() + hor_stabilizer.volume() + vert_stabilizer.volume()
-foam_mass = foam_volume * 30.0  # foam 30kg.m^2
-spar_mass = (wingspan / 2 + boom_length) * 0.09  # 90g/m carbon spar 22mm
-fuselages_mass = 0.4  # 1kg for all fuselage pods
+mass_foam = foam_volume * 30.0  # foam 30kg.m^2
+mass_spar = (wingspan / 2 + boom_length) * 0.09
+mass_fuselages = 0.2 # rough estimate
+
 
 ## Total
-weight = 9.81 * (
-    solar_cell_mass + 
-    battery_mass + 
-    foam_mass + 
-    spar_mass + 
-    fuselages_mass +
-    mass_motor_raw + 
+total_mass = (
+    mass_solar_cells + 
+    mass_batteries + 
+    mass_wires + 
+    mass_avionics +
+    mass_servos +
+    mass_motors_mounted + 
     mass_esc + 
-    mass_propeller +
-    mass_wires
+    mass_propellers +
+    mass_spar + mass_foam +
+    mass_fuselages
 )
+total_weight = total_mass * 9.81
 
 
 ### STABILITY
@@ -311,68 +315,93 @@ static_margin = (cg_le_dist - aero["x_np"]) / np.softmax(1e-6, main_wing.mean_ae
 
 ### CONSTRAINTS
 # Mission
-opti.subject_to(weight <= 7 * 9.81)
+opti.subject_to(total_mass < togw_design)
 
 # Performance
-opti.subject_to([
-    thrust_force > aero["D_tot"],
-    power_out_max > power_out_propulsion_shaft,
-    power_out_propulsion_shaft > 0
-])
+opti.subject_to(thrust_cruise > aero["D"])
+opti.subject_to(power_out_max > power_shaft_cruise)
+opti.subject_to(power_out_max > thrust_climb * airspeed)
+opti.subject_to(motor_kv > 150)
 
 # Aerodynamic
-opti.subject_to(aero["L"] == weight)
-opti.subject_to(wing_airfoil.max_thickness() * chordlen > 0.030)  # must accomodate main spar (22mm)
-opti.subject_to(wingspan > 0.13 * n_solar_panels)  # Must be able to fit all of our solar panels 13cm each
+opti.subject_to(aero["L"] > togw_design)
+opti.subject_to(chordlen >= solar_panels_n_rows * 0.13)
+opti.subject_to(wing_airfoil.max_thickness() * chordlen >= 0.030)  # must accomodate main spar (22mm)
+opti.subject_to(wingspan >= 0.13 * solar_panels_n / solar_panels_n_rows)  # Must be able to fit all of our solar panels 13cm each
 
 # Stability
 opti.subject_to(cg_le_dist <= 0.25 * chordlen)
-# opti.subject_to([
-#     static_margin > 0.1,
-#     static_margin < 0.5
-# ])
+# opti.subject_to(static_margin > 0.1)
+# opti.subject_to(static_margin < 0.5)
 
 # Power
-opti.subject_to([
-    battery_states > battery_capacity * (1-allowable_battery_depth_of_discharge),
-    battery_states[0] <= battery_states[N-1]
-])
+opti.subject_to(battery_states > battery_capacity * (1-allowable_battery_depth_of_discharge))
+opti.subject_to(battery_states[0] <= battery_states[N-1])
 
 
 ### SOLVE
 opti.minimize(wingspan)
-sol = opti.solve()
-opti.save_solution()
+
+try:
+    sol = opti.solve()
+    opti.save_solution()
+except RuntimeError:
+    sol = opti.debug
+
+s = lambda x: sol.value(x)
 
 print("---Performance---")
-print("Airspeed:", sol(airspeed))
-print("Total drag:", sol(aero["CD_tot"]))
+print("Airspeed:", s(airspeed))
+print("Thrust Force:", s(thrust_cruise))
+print("Power out max:", s(power_out_max))
+print("Mass", s(total_mass))
+print("Weight", s(total_weight))
+
+print("\n--- Aerodynamics ---")
+print("CL", s(aero["CL"]))
+print("CD", s(aero["CD"]))
+print("Total lift:", s(aero["L"]))
+print("Total drag:", s(aero["D"]))
 
 print("\n--- Wing Dimensions ---")
-print("Wingspan:", sol(wingspan))
-print("Chordlen:", sol(chordlen))
-print("Hstab AoA:", sol(hstab_aoa))
-print("Hstab span:", sol(hstab_span))
+print("Wingspan:", s(wingspan))
+print("Chordlen:", s(chordlen))
+print("Struct defined AoA: ", s(struct_defined_aoa))
+print("Hstab AoA:", s(hstab_aoa))
+print("Hstab span:", s(hstab_span))
+
+print("\n--- Structral Dimensions ---")
+print("cg_le_dist:", s(cg_le_dist))
+print("Boom length:", s(boom_length))
+print("Wing mass:", s(mass_foam))
+# print("Spar mass:", s(mass_spar))
+print("Fuselage mass:", s(mass_fuselages))
 
 print("\n--- Power ---")
-print("Solar cells #:", sol(n_solar_panels))
-print("Solar cell mass:", sol(solar_cell_mass))
-print("Battery mass:", sol(battery_mass))
-print("Battery pack #:", sol(num_packs))
+print("Solar cells #:", s(solar_panels_n))
+print("Solar cell mass:", s(mass_solar_cells))
+print("Battery mass:", s(mass_batteries))
+print("Battery pack #:", s(num_packs))
+print("Wire mass:", s(mass_wires))
+
+print("\n--- Power ---")
+print("Avionics mass:", mass_avionics)
 
 print("\n--- Propulsion ---")
-print("Motor RPM", sol(motor_rpm))
-print("Motor KV", sol(motor_kv))
-print("Propeller diameter:", sol(propeller_diameter))
-print("Motor mass:", sol(mass_motor_raw))
-print("ESC mass:", sol(mass_esc))
+print("Motor #:", s(propeller_n))
+print("Motor RPM:", s(motor_rpm))
+print("Motor KV", s(motor_kv))
+print("Propeller diameter:", s(propeller_diameter))
+print("Propeller mass:", s(mass_propellers))
+print("Motor mass:", s(mass_motor_raw))
+print("ESC mass:", s(mass_esc))
 
 
 # for k, v in aero.items():
 #     print(f"{k.rjust(4)} : {sol(aero[k])}")
 
-vlm=sol(vlm)
-vlm.draw()
+# vlm=sol(vlm)
+# vlm.draw()
 
 airplane=sol(airplane)
 airplane.draw()
