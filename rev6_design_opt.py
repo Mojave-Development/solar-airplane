@@ -16,7 +16,6 @@ temperature_high = 278 # in Kelvin --> this is 60 deg F addition to ISA temperat
 operating_altitude = 1200 # in meters
 operating_atm = Atmosphere(operating_altitude, temperature_deviation=temperature_high)
 
-
 ## Aerodynamics
 # Airfoils
 wing_airfoil = asb.Airfoil("sd7037")
@@ -29,14 +28,14 @@ polyhedral_angle = 10
 vstab_span = 0.3
 vstab_chordlen = 0.15
 
-# Structural
+## Structural
 structural_mass_markup = 1.2
 
 ## Power
+battery_voltage = 22.2
 N = 180  # Number of discretization points
 time = np.linspace(0, 24 * 60 * 60, N)  # s
 dt = np.diff(time)[0]  # s
-battery_voltage = 22.2
 solar_panels_n_rows = 2
 solar_encapsulation_eff_hit = 0.1 # Estimated 10% efficieincy loss from encapsulation.
 solar_cell_efficiency = 0.243 * (1 - solar_encapsulation_eff_hit)
@@ -45,12 +44,22 @@ allowable_battery_depth_of_discharge = 0.85  # How much of the battery can you a
 
 
 ### VARIABLES
-# Performance
+## Performance
 airspeed = opti.variable(init_guess=15, lower_bound=5, upper_bound=30, scale=5, category="airspeed")
 togw_design = opti.variable(init_guess=4, lower_bound=1e-3, upper_bound=togw_max, category="togw_max")
-thrust_cruise = opti.variable(init_guess=4, lower_bound=0, scale=2, category="thrust_cruise")
 power_out_max = opti.variable(init_guess=500, lower_bound=25*16, scale=100, category="power_out_max")
 
+## Propulsion
+thrust_cruise = opti.variable(init_guess=4, lower_bound=0, scale=2, category="thrust_cruise")
+propeller_n = opti.parameter(2)
+propeller_diameter = opti.variable(init_guess=0.5, lower_bound=0.1, upper_bound=2, scale=1, category="propeller_diameter")
+
+## Avionics
+solar_panels_n = opti.variable(init_guess=40, lower_bound=10, category="solar_panels_n", scale=40)
+battery_capacity = opti.variable(init_guess=450, lower_bound=100, category="battery_capacity", scale=150)  # initial battery energy in Wh
+battery_states = opti.variable(n_vars=N, init_guess=500, category="battery_states", scale=100)
+
+## Aerodynamics
 # Main wing
 wingspan = opti.variable(init_guess=6, lower_bound=2, upper_bound=7, scale=2, category="wingspan")
 chordlen = opti.variable(init_guess=0.3, scale=1, category="chordlen")
@@ -65,14 +74,6 @@ hstab_aoa = opti.variable(init_guess=-5, lower_bound=-5, upper_bound=0, scale=5,
 # Structural
 boom_length = opti.variable(init_guess=2, lower_bound=1.0, upper_bound=4, scale=2, category="boom_length")
 
-# Propulsion
-propeller_n = opti.parameter(2)
-propeller_diameter = opti.variable(init_guess=0.5, lower_bound=0.1, upper_bound=2, scale=1, category="propeller_diameter")
-
-# Avionics
-solar_panels_n = opti.variable(init_guess=40, lower_bound=10, category="solar_panels_n", scale=40)
-battery_capacity = opti.variable(init_guess=450, lower_bound=100, category="battery_capacity", scale=150)  # initial battery energy in Wh
-battery_states = opti.variable(n_vars=N, init_guess=500, category="battery_states", scale=100)
 
 
 ### GEOMETRIES
