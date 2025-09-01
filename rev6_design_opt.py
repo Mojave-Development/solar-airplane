@@ -8,7 +8,7 @@ opti=asb.Opti(cache_filename="output/soln1.json")
 
 
 ### CONSTANTS
-# Mission
+## Mission
 mission_date = 100
 operating_lat = 37.398928
 togw_max = 7 # kg
@@ -16,6 +16,8 @@ temperature_high = 278 # in Kelvin --> this is 60 deg F addition to ISA temperat
 operating_altitude = 1200 # in meters
 operating_atm = Atmosphere(operating_altitude, temperature_deviation=temperature_high)
 
+
+## Aerodynamics
 # Airfoils
 wing_airfoil = asb.Airfoil("sd7037")
 tail_airfoil = asb.Airfoil("naca0010")
@@ -30,7 +32,7 @@ vstab_chordlen = 0.15
 # Structural
 structural_mass_markup = 1.2
 
-# Power
+## Power
 N = 180  # Number of discretization points
 time = np.linspace(0, 24 * 60 * 60, N)  # s
 dt = np.diff(time)[0]  # s
@@ -66,7 +68,6 @@ boom_length = opti.variable(init_guess=2, lower_bound=1.0, upper_bound=4, scale=
 # Propulsion
 propeller_n = opti.parameter(2)
 propeller_diameter = opti.variable(init_guess=0.5, lower_bound=0.1, upper_bound=2, scale=1, category="propeller_diameter")
-motor_rpm = opti.variable(init_guess=4000, lower_bound=2000, upper_bound=10000, scale=4000, category="motor_rpm")
 
 # Avionics
 solar_panels_n = opti.variable(init_guess=40, lower_bound=10, category="solar_panels_n", scale=40)
@@ -350,7 +351,7 @@ s = lambda x: sol.value(x)
 
 print("---Performance---")
 print("Airspeed:", s(airspeed))
-print("Thrust Force:", s(thrust_cruise))
+print("Thrust cruise:", s(thrust_cruise))
 print("Power out max:", s(power_out_max))
 print("Mass:", s(total_mass))
 print("TOGW Max:", s(togw_max))
@@ -393,7 +394,7 @@ print("Avionics mass:", mass_avionics)
 
 print("\n--- Propulsion ---")
 print("Motor #:", s(propeller_n))
-print("Motor RPM:", s(motor_rpm))
+print("Motor RPM:", s(propeller_rpm))
 print("Motor KV", s(motor_kv))
 print("Propeller diameter:", s(propeller_diameter))
 print("Propeller mass:", s(mass_propellers))
