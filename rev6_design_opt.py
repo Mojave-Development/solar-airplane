@@ -254,7 +254,7 @@ for i in range(N-1):
 mass_solar_cells = 0.015 * solar_panels_n
 mass_batteries = propulsion_electric.mass_battery_pack(
     battery_capacity_Wh=battery_capacity,
-    battery_pack_cell_fraction=0.9
+    battery_pack_cell_fraction=0.95
 )
 num_packs = battery_capacity / (5 * 6 * 3.7) # 5 ah, 6 cells, 3.7 V/cell
 mass_wires = propulsion_electric.mass_wires(
