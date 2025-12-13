@@ -2,6 +2,7 @@ import aerosandbox as asb
 import aerosandbox.numpy as np
 from aerosandbox.library import power_solar, propulsion_electric, propulsion_propeller
 from aerosandbox.atmosphere import Atmosphere
+import numpy as onp
 
 
 opti=asb.Opti(cache_filename="output/soln1.json")
@@ -11,22 +12,26 @@ opti=asb.Opti(cache_filename="output/soln1.json")
 ## Mission
 mission_date = 100
 operating_lat = 37.398928
-togw_max = 7 # kg
+togw_max = 12 # kg
 temperature_high = 278 # in Kelvin --> this is 60 deg F addition to ISA temperature at 0 meter MSL
 operating_altitude = 1200 # in meters
 operating_atm = Atmosphere(operating_altitude, temperature_deviation=temperature_high)
 
 ## Aerodynamics
 # Airfoils
-wing_airfoil = asb.Airfoil("sd7037")
+wing_airfoil = asb.Airfoil("s4110")
 tail_airfoil = asb.Airfoil("naca0010")
 
 # Main wing
 polyhedral_angle = 10
 
-# Vstab
-vstab_span = 0.3
-vstab_chordlen = 0.15
+# Tail sizing (via Tail Volume Coefficients)
+V_H = 0.50  # Horizontal tail volume coefficient
+V_V = 0.020  # Vertical tail volume coefficient
+
+# Static margin constraints (dimensionless, SM = (x_np - x_cg) / MAC)
+SM_min = 0.05
+SM_max = 0.6
 
 ## Structural
 structural_mass_markup = 1.2
@@ -34,14 +39,36 @@ structural_mass_markup = 1.2
 ## Power
 battery_voltage = 22.2
 N = 180  # Number of discretization points
-time = np.linspace(0, 24 * 60 * 60, N)  # s
-dt = np.diff(time)[0]  # s
+time = onp.linspace(0, 24 * 60 * 60, N)  # s (numeric; does not need to be symbolic)
+dt = onp.diff(time)[0]  # s
 solar_panels_n_rows = 2
 solar_encapsulation_eff_hit = 0.1 # Estimated 10% efficieincy loss from encapsulation.
 solar_cell_efficiency = 0.243 * (1 - solar_encapsulation_eff_hit)
 energy_generation_margin = 1.05
 allowable_battery_depth_of_discharge = 0.85  # How much of the battery can you actually use?
 
+# Precompute solar flux profile numerically (robust vs NaNs from symbolic trig/acos edge cases)
+solar_flux_profile = onp.array(
+    [
+        power_solar.solar_flux(
+            latitude=operating_lat,
+            day_of_year=mission_date,
+            time=float(t),
+            altitude=operating_altitude,
+            panel_azimuth_angle=0,
+            panel_tilt_angle=0,
+        )
+        for t in time
+    ],
+    dtype=float,
+)
+solar_flux_profile = onp.nan_to_num(solar_flux_profile, nan=0.0, posinf=0.0, neginf=0.0)
+solar_flux_profile = onp.maximum(solar_flux_profile, 0.0)
+print(
+    f"[solar_flux_profile] min={solar_flux_profile.min():.3f} W/m^2, "
+    f"max={solar_flux_profile.max():.3f} W/m^2, "
+    f"nan_count={onp.isnan(solar_flux_profile).sum()}"
+)
 
 ### VARIABLES
 ## Performance
@@ -62,17 +89,19 @@ battery_states = opti.variable(n_vars=N, init_guess=500, category="battery_state
 ## Aerodynamics
 # Main wing
 wingspan = opti.variable(init_guess=6, lower_bound=2, upper_bound=7, scale=2, category="wingspan")
-chordlen = opti.variable(init_guess=0.3, scale=1, category="chordlen")
+chordlen = opti.variable(init_guess=0.3, lower_bound=0.05, scale=1, category="chordlen")
 struct_defined_aoa = opti.variable(init_guess=2, lower_bound=0, upper_bound=7, scale=1, category="struct_aoa")
-cg_le_dist = opti.variable(init_guess=0.05, lower_bound=0, scale=0.05, category="cg_le_dist")
+cg_le_dist = 0.25 * chordlen  # CG assumed at quarter-chord of main wing
 
-# Hstab
-hstab_span = opti.variable(init_guess=0.5, lower_bound=0.3, upper_bound=1, scale=0.5, category="hstab_span")
-hstab_chordlen = opti.variable(init_guess=0.2, lower_bound=0.15, upper_bound=0.4, scale=0.2, category="hstab_chordlen")
+# Empennage (sized by tail volume coeffs)
+hstab_AR = opti.variable(init_guess=6.0, lower_bound=2.0, upper_bound=20.0, scale=5, category="hstab_AR")
+vstab_AR = 2.0
 hstab_aoa = opti.variable(init_guess=-5, lower_bound=-5, upper_bound=0, scale=5, category="hstab_aoa")
 
 # Structural
-boom_length = opti.variable(init_guess=2, lower_bound=1.0, upper_bound=4, scale=2, category="boom_length")
+boom_length = opti.variable(init_guess=0.5, lower_bound=0.1, upper_bound=1, scale=0.5, category="boom_length")
+boom_spacing_frac = 0.30
+boom_y = 0.5 * boom_spacing_frac * wingspan
 
 
 
@@ -92,7 +121,7 @@ main_wing = asb.Wing(
             airfoil=wing_airfoil,  # Airfoils are blended between a given XSec and the next one.
         ),
         asb.WingXSec(  # Mid
-            xyz_le=[0.00, 0.5 * wingspan / 2, 0],
+            xyz_le=[0.00, boom_y, 0],
             chord=chordlen,
             twist=struct_defined_aoa,
             airfoil=wing_airfoil,
@@ -105,6 +134,65 @@ main_wing = asb.Wing(
         ),
     ],
 )
+
+# Tail sizing from volume coefficients + aspect ratio (rectangular planforms)
+S_w = main_wing.area()
+MAC_w = main_wing.mean_aerodynamic_chord()
+b_w = main_wing.span()
+
+# Vertical tail
+L_V = boom_length - cg_le_dist
+vstab_area_total = V_V * S_w * b_w / L_V
+vstab_area = 0.5 * vstab_area_total
+vstab_span = np.sqrt(vstab_AR * vstab_area)  # "span" here is height
+vstab_chordlen = np.sqrt(vstab_area / vstab_AR)
+x_le_vstab = boom_length - 0.25 * vstab_chordlen
+
+vert_stabilizer_L = asb.Wing(
+    name="Vertical Stabilizer L",
+    symmetric=False,
+    xsecs=[
+        asb.WingXSec(
+            xyz_le=[0, 0, 0],
+            chord=vstab_chordlen,
+            twist=0,
+            airfoil=tail_airfoil,
+        ),
+        asb.WingXSec(
+            xyz_le=[0.00, 0, vstab_span],
+            chord=vstab_chordlen,
+            twist=0,
+            airfoil=tail_airfoil,
+        ),
+    ],
+).translate([x_le_vstab, boom_y, 0])
+
+vert_stabilizer_R = asb.Wing(
+    name="Vertical Stabilizer R",
+    symmetric=False,
+    xsecs=[
+        asb.WingXSec(
+            xyz_le=[0, 0, 0],
+            chord=vstab_chordlen,
+            twist=0,
+            airfoil=tail_airfoil,
+        ),
+        asb.WingXSec(
+            xyz_le=[0.00, 0, vstab_span],
+            chord=vstab_chordlen,
+            twist=0,
+            airfoil=tail_airfoil,
+        ),
+    ],
+).translate([x_le_vstab, -boom_y, 0])
+
+# Horizontal tail
+hstab_ac_x = boom_length
+L_H = hstab_ac_x - cg_le_dist
+hstab_area = V_H * S_w * MAC_w / L_H
+hstab_span = boom_y * 2
+hstab_chordlen = hstab_area / hstab_span
+x_le_hstab = boom_length - 0.25 * hstab_chordlen
 
 hor_stabilizer = asb.Wing(
     name="Horizontal Stabilizer",
@@ -123,46 +211,31 @@ hor_stabilizer = asb.Wing(
             airfoil=tail_airfoil,
         ),
     ],
-).translate([boom_length, 0, 0])
+).translate([x_le_hstab, 0, vstab_span])
 
-vert_stabilizer = asb.Wing(
-    name="Vertical Stabilizer",
-    symmetric=False,
+# Booms
+boom_radius = 0.01
+boom_L = asb.Fuselage(
+    name="Boom L",
     xsecs=[
-        asb.WingXSec(
-            xyz_le=[0, 0, 0],
-            chord=vstab_chordlen,
-            twist=0,
-            airfoil=tail_airfoil,
-        ),
-        asb.WingXSec(
-            xyz_le=[0.00, 0, vstab_span],
-            chord=vstab_chordlen,
-            twist=0,
-            airfoil=tail_airfoil,
-        ),
+        asb.FuselageXSec(xyz_c=[boom_length * xi, boom_y, -0.02], radius=boom_radius)
+        for xi in np.cosspace(0, 1, 20)
     ],
-).translate([boom_length + hstab_chordlen, 0, 0])
+)
+boom_R = asb.Fuselage(
+    name="Boom R",
+    xsecs=[
+        asb.FuselageXSec(xyz_c=[boom_length * xi, -boom_y, -0.02], radius=boom_radius)
+        for xi in np.cosspace(0, 1, 20)
+    ],
+)
 
-main_fuselage = asb.Fuselage(  # main fuselage
-    name="Fuselage",
-    xsecs=[
-        asb.FuselageXSec(
-            xyz_c=[0.5 * xi, 0, 0],
-            radius=0.6
-            * asb.Airfoil("dae51").local_thickness(
-                x_over_c=xi
-            ),  # half a meter fuselage. Starting at LE and 0.5m forward
-        )
-        for xi in np.cosspace(0, 1, 30)
-    ],
-).translate([-0.5, 0, 0])
 
 left_pod = asb.Fuselage(  # left pod fuselage
-    name="Fuselage",
+    name="Left Fuse",
     xsecs=[
         asb.FuselageXSec(
-            xyz_c=[0.2 * xi, 0.75, -0.02],
+            xyz_c=[0.5 * xi - 0.5, boom_y, -0.02],
             radius=0.4
             * asb.Airfoil("dae51").local_thickness(
                 x_over_c=xi
@@ -173,10 +246,10 @@ left_pod = asb.Fuselage(  # left pod fuselage
 )
 
 right_pod = asb.Fuselage(  # right pod fuselage
-    name="Fuselage",
+    name="Right Fuselage",
     xsecs=[
         asb.FuselageXSec(
-            xyz_c=[0.2 * xi, -0.75, -0.02],
+            xyz_c=[0.5 * xi - 0.5, -boom_y, -0.02],
             radius=0.4
             * asb.Airfoil("dae51").local_thickness(
                 x_over_c=xi
@@ -186,11 +259,12 @@ right_pod = asb.Fuselage(  # right pod fuselage
     ],
 )
 
+
 airplane = asb.Airplane(
     name="rev 6",
-    xyz_ref=[0.1 * chordlen, 0, 0],  # CG location
-    wings=[main_wing, hor_stabilizer, vert_stabilizer],
-    fuselages=[main_fuselage, left_pod, right_pod],
+    xyz_ref=[cg_le_dist, 0, 0],  # CG location (measured from main wing LE)
+    wings=[main_wing, hor_stabilizer, vert_stabilizer_L, vert_stabilizer_R],
+    fuselages=[left_pod, right_pod, boom_L, boom_R],
 )
 
 
@@ -212,6 +286,10 @@ aero = vlm.run_with_stability_derivatives(
 aero["power"] = aero["D"] * airspeed
 
 
+### STABILITY
+static_margin = (aero["x_np"] - cg_le_dist) / main_wing.mean_aerodynamic_chord()
+
+
 ### PROPULSION
 power_shaft_cruise = propulsion_propeller.propeller_shaft_power_from_thrust(
     thrust_force=thrust_cruise,
@@ -226,19 +304,12 @@ propeller_rads_per_sec = propeller_tip_mach * Atmosphere(altitude=1100).speed_of
 propeller_rpm = propeller_rads_per_sec * 30 / np.pi
 motor_kv = propeller_rpm / battery_voltage
 
-thrust_climb = togw_design * 9.81 * np.sind(45) + aero["D"]
+thrust_climb = togw_design * 9.81 * np.sind(30) + aero["D"]
 
 
 ### POWER
 for i in range(N-1):
-    solar_flux = power_solar.solar_flux(
-        latitude=operating_lat,
-        day_of_year=mission_date,
-        time=time[i],
-        altitude=operating_altitude,
-        panel_azimuth_angle=0,
-        panel_tilt_angle=0
-    ) # W / m^2
+    solar_flux = solar_flux_profile[i]  # W / m^2 (numeric constant)
 
     solar_area = solar_panels_n * 0.125**2 # m^2
     power_generated = solar_flux * solar_area * solar_cell_efficiency / energy_generation_margin
@@ -251,7 +322,7 @@ for i in range(N-1):
 
 ### Mass
 # Power
-mass_solar_cells = 0.015 * solar_panels_n
+mass_solar_cells = 0.01 * solar_panels_n
 mass_batteries = propulsion_electric.mass_battery_pack(
     battery_capacity_Wh=battery_capacity,
     battery_pack_cell_fraction=0.95
@@ -289,9 +360,10 @@ mass_propellers = propeller_n * propulsion_propeller.mass_hpa_propeller(
 )
 
 # Structures
-foam_volume = main_wing.volume() + hor_stabilizer.volume() + vert_stabilizer.volume()
-mass_foam = foam_volume * 30.0  # foam 30kg.m^2
-mass_spar = (wingspan / 2 + boom_length) * 0.09
+mass_hstab = hor_stabilizer.area() * 0.5
+mass_vstab = (vert_stabilizer_L.area() + vert_stabilizer_R.area()) * 0.5
+mass_main_wing = main_wing.area() * 0.7
+mass_boom = 2 * 0.09 * boom_length  # kg (90 g/m per boom)
 mass_fuselages = 0.2 # rough estimate
 
 
@@ -305,12 +377,10 @@ total_mass = (
     mass_motors_mounted + 
     mass_esc + 
     mass_propellers +
-    mass_spar + mass_foam +
+    mass_main_wing + mass_hstab + mass_vstab +
+    mass_boom +
     mass_fuselages
 )
-
-### STABILITY
-static_margin = (cg_le_dist - aero["x_np"]) / np.softmax(1e-6, main_wing.mean_aerodynamic_chord(), hardness=10)
 
 
 ### CONSTRAINTS
@@ -325,30 +395,42 @@ opti.subject_to(motor_kv >= 150)
 
 # Aerodynamic
 opti.subject_to(aero["L"] >= togw_design * 9.81)
-opti.subject_to(chordlen >= solar_panels_n_rows * 0.13 + 0.1) # ! Justify this addition of 0.1
-opti.subject_to(wing_airfoil.max_thickness() * chordlen >= 0.030)  # must accomodate main spar (22mm)
+opti.subject_to(chordlen >= solar_panels_n_rows * 0.13 + 0.05) # ! Justify this addition of 0.1
+opti.subject_to(wing_airfoil.max_thickness() * chordlen >= 0.025)  # must accomodate batteries (20mm)
 opti.subject_to(wingspan >= 0.13 * solar_panels_n / solar_panels_n_rows)  # Must be able to fit all of our solar panels 13cm each
+opti.subject_to(hstab_chordlen >= 0.2) # Fit 1 row of panels w/ room for elevator
 
 # Stability
-opti.subject_to(cg_le_dist <= 0.25 * chordlen)
-# opti.subject_to(static_margin > 0.1)
-# opti.subject_to(static_margin < 0.5)
+tail_gap = 0.15
+opti.subject_to(L_H >= 1e-3)
+opti.subject_to(L_V >= 1e-3)
+opti.subject_to(x_le_hstab >= chordlen + tail_gap)
+opti.subject_to(static_margin >= SM_min)
+opti.subject_to(static_margin <= SM_max)
 
 # Power
-opti.subject_to(battery_states > battery_capacity * (1-allowable_battery_depth_of_discharge))
+opti.subject_to(battery_states >= battery_capacity * (1-allowable_battery_depth_of_discharge))
 opti.subject_to(battery_states[0] <= battery_states[N-1])
 
 
 ### SOLVE
-opti.minimize(wingspan)
+opti.minimize(total_mass)
 
 try:
     sol = opti.solve()
     opti.save_solution()
-except RuntimeError:
+except Exception:
     sol = opti.debug
 
-s = lambda x: sol.value(x)
+def s(x):
+    """
+    Safely evaluates an expression at the current solution/debug iterate.
+    (If the NLP never solved / never iterated, returns NaN instead of crashing.)
+    """
+    try:
+        return sol.value(x)
+    except Exception:
+        return float("nan")
 
 print("---Performance---")
 print("Airspeed:", s(airspeed))
@@ -372,14 +454,26 @@ print("Main wing chord length:", s(chordlen))
 print("Main wing AR:", s(main_wing.aspect_ratio()))
 print("Struct defined AoA: ", s(struct_defined_aoa))
 print("Hstab AoA:", s(hstab_aoa))
+print("Hstab AR:", hstab_AR)
+print("Hstab area:", s(hstab_area))
 print("Hstab span:", s(hstab_span))
 print("Hstab chord:", s(hstab_chordlen))
+print("Vstab AR:", vstab_AR)
+print("Vstab area (each):", s(vstab_area))
+print("Vstab area (total):", s(vstab_area_total))
+print("Vstab span:", s(vstab_span))
+print("Vstab chord:", s(vstab_chordlen))
+print("Static margin:", s(static_margin))
+print("V_H (actual):", s((hstab_area * L_H) / (S_w * MAC_w)))
+print("V_V (actual):", s((vstab_area_total * L_V) / (S_w * b_w)))
 
 print("\n--- Structral Dimensions ---")
 print("cg_le_dist:", s(cg_le_dist))
 print("Boom length:", s(boom_length))
-print("Wing mass:", s(mass_foam))
-# print("Spar mass:", s(mass_spar))
+print("Boom mass:", s(mass_boom))
+print("Hstab mass:", s(mass_hstab))
+print("Vstab mass:", s(mass_vstab))
+print("Main wing mass:", s(mass_main_wing))
 print("Fuselage mass:", s(mass_fuselages))
 
 print("\n--- Power ---")
@@ -409,5 +503,6 @@ print("ESCs mass:", s(mass_esc))
 # vlm=sol(vlm)
 # vlm.draw()
 
-airplane=sol(airplane)
-airplane.draw()
+
+airplane_sol = sol(airplane)
+airplane_sol.draw()
