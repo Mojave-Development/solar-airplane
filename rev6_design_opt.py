@@ -37,7 +37,7 @@ V_V = 0.02  # Vertical tail volume coefficient
 
 # Static margin constraints (dimensionless, SM = (x_np - x_cg) / MAC)
 SM_min = 0.05
-SM_max = 0.6
+SM_max = 0.5
 
 # Stall / low-Re realism (AeroBuildup does not model stall)
 CLmax_cruise = 1.3          # conservative-ish small UAV CLmax (update if you have airfoil data)
@@ -111,7 +111,7 @@ wingspan = opti.variable(init_guess=6, lower_bound=2, upper_bound=7, scale=2, ca
 chordlen = opti.variable(init_guess=0.3, lower_bound=0.05, scale=1, category="chordlen")
 struct_defined_aoa = opti.variable(init_guess=2, lower_bound=0, upper_bound=7, scale=1, category="struct_aoa")
 cg_le_dist = 0.25 * chordlen  # CG assumed at quarter-chord of main wing
-alpha_cruise = opti.variable(init_guess=3, lower_bound=-2, upper_bound=10, scale=5, category="alpha_cruise")
+# alpha_cruise = opti.variable(init_guess=3, lower_bound=-2, upper_bound=10, scale=5, category="alpha_cruise")
 
 # Empennage (sized by tail volume coeffs)
 hstab_AR = opti.variable(init_guess=6.0, lower_bound=2.0, upper_bound=20.0, scale=5, category="hstab_AR")
@@ -290,7 +290,7 @@ vlm = asb.AeroBuildup(
     op_point=asb.OperatingPoint(
         atmosphere=operating_atm,
         velocity=airspeed,  # m/s
-        alpha=alpha_cruise,  # deg (trim variable)
+        # alpha=alpha_cruise,  # deg (trim variable)
     ),
 )
 aero = vlm.run_with_stability_derivatives(
@@ -381,7 +381,7 @@ mass_propellers = propeller_n * propulsion_propeller.mass_hpa_propeller(
 # Structures
 mass_hstab = hor_stabilizer.area("wetted")*1.2 * 0.6 # 600g per meter squared of wetted area
 mass_vstab = (vert_stabilizer_L.area("wetted")*1.2 + vert_stabilizer_R.area("wetted")) * 0.6 # 600g per meter squared of wetted area
-mass_main_wing =  main_wing.area("wetted")*1.5 * 0.7 # 770g per meter squared of planform area
+mass_main_wing =  main_wing.area("wetted")*1.5 * 0.700 # 770g per meter squared of planform area
 mass_boom = 2 * 0.09 * boom_length  # kg (90 g/m per boom)
 mass_fuselages = 0.2 # rough estimate
 
@@ -400,6 +400,7 @@ total_mass = (
     mass_boom +
     mass_fuselages
 )
+
 
 
 ### CONSTRAINTS
@@ -479,7 +480,7 @@ print("CD", s(aero["CD"]))
 print("L/D", s(aero["CL"]/aero["CD"]))
 print("Total lift (N):", s(aero["L"]))
 print("Total drag (N):", s(aero["D"]))
-print("Alpha cruise (°):", s(alpha_cruise))
+# print("Alpha cruise (°):", s(alpha_cruise))
 print("CL cruise:", s(aero["CL"]))
 print("Stall speed (m/s):", s(V_stall))
 
@@ -551,11 +552,62 @@ print("ESCs mass:", s(mass_esc))
 # vlm.draw()
 
 
+airplane_sol = None
 try:
+    if not callable(sol):
+        raise TypeError(f"Solution object is not callable (type: {type(sol)}).")
     airplane_sol = sol(airplane)
     airplane_sol.draw()
 except Exception as e:
     print(f"[draw] Skipping airplane draw (no solved solution): {e}")
+
+# Export to XFLR5 (XML)
+# Note: AeroSandbox's XFLR5 exporter supports exactly 3 lifting surfaces: main wing, elevator, and fin.
+# Our geometry has a twin-fin (two vertical stabilizers), so we synthesize a single centerline fin for export.
+xflr5_filename = "output/rev6_xflr5.xml"
+try:
+    if airplane_sol is None:
+        raise RuntimeError("No solved airplane geometry available to export.")
+
+    # Pick main wing and elevator directly from solved airplane.
+    mainwing_xflr = airplane_sol.wings[0]
+    elevator_xflr = airplane_sol.wings[1]
+
+    # Build a single centerline fin using solved values (based on the per-fin geometry).
+    vstab_root_chord_xflr = float(s(vstab_root_chord))
+    vstab_tip_chord_xflr = float(s(hstab_chordlen))
+    vstab_span_xflr = float(s(vstab_span))
+    boom_length_xflr = float(s(boom_length))
+
+    fin_xflr = asb.Wing(
+        name="Vertical Stabilizer (XFLR5)",
+        symmetric=False,
+        xsecs=[
+            asb.WingXSec(
+                xyz_le=[0.0, 0.0, 0.0],
+                chord=vstab_root_chord_xflr,
+                twist=0.0,
+                airfoil=tail_airfoil,
+            ),
+            asb.WingXSec(
+                xyz_le=[vstab_root_chord_xflr / 4, 0.0, vstab_span_xflr],
+                chord=vstab_tip_chord_xflr,
+                twist=0.0,
+                airfoil=tail_airfoil,
+            ),
+        ],
+    ).translate([boom_length_xflr, 0.0, 0.0])
+
+    airplane_sol.export_XFLR5_xml(
+        xflr5_filename,
+        include_fuselages=False,  # not implemented in AeroSandbox exporter
+        mainwing=mainwing_xflr,
+        elevator=elevator_xflr,
+        fin=fin_xflr,
+    )
+    print(f"[XFLR5] Exported: {xflr5_filename}")
+except Exception as e:
+    print(f"[XFLR5] Skipping export ({xflr5_filename}): {e}")
 
 # Export to CAD (STEP) via CadQuery geometry
 # step_filename = "output/rev6.step"
