@@ -1,0 +1,197 @@
+<?xml version="1.0"?>
+<FDMConfig name="SolarSimple" version="2.0">
+
+  <!-- ========================================================= -->
+  <!--  METRICS: BASIC GEOMETRY                                  -->
+  <!-- ========================================================= -->
+  <metrics>
+    <!-- Rough numbers for a small solar UAV; adjust to your design -->
+    <wingarea unit="M2"> 1.2 </wingarea>      <!-- reference wing area -->
+    <wingspan unit="M"> 3.0 </wingspan>      <!-- span -->
+    <chord unit="M"> 0.4 </chord>            <!-- mean aerodynamic chord -->
+
+    <!-- aero reference point (where aero forces act), in meters -->
+    <location name="AERORP" unit="M">
+      <x> 0.4 </x>
+      <y> 0.0 </y>
+      <z> 0.0 </z>
+    </location>
+  </metrics>
+
+  <!-- ========================================================= -->
+  <!--  MASS AND INERTIA                                         -->
+  <!-- ========================================================= -->
+  <mass_balance name="mass_balance">
+    <!-- Mass ≈ 6.0 kg -->
+    <emptywt unit="LBS"> 13.2277 </emptywt>
+
+    <!-- CG in aircraft axes (feet) -->
+    <location name="CG">
+      <x unit="FT"> 0.5 </x>
+      <y unit="FT"> 0.0 </y>
+      <z unit="FT"> 0.0 </z>
+    </location>
+
+    <!-- Simple inertia tensor (slug*ft^2) for small UAV -->
+    <ixx unit="SLUG*FT2"> 0.15 </ixx>
+    <iyy unit="SLUG*FT2"> 0.35 </iyy>
+    <izz unit="SLUG*FT2"> 0.45 </izz>
+    <ixz unit="SLUG*FT2"> 0.00 </ixz>
+  </mass_balance>
+
+  <!-- ========================================================= -->
+  <!--  GROUND REACTIONS (MINIMAL GEAR MODEL)                    -->
+  <!-- ========================================================= -->
+  <ground_reactions>
+    <!-- Single simple "gear" point under CG so JSBSim is happy -->
+    <contact type="BOGEY" name="MAIN">
+      <location unit="FT">
+        <x> 0.0 </x>
+        <y> 0.0 </y>
+        <z> -1.0 </z>  <!-- 1 ft below CG -->
+      </location>
+      <static_friction> 0.8 </static_friction>
+      <dynamic_friction> 0.5 </dynamic_friction>
+      <rolling_friction> 0.02 </rolling_friction>
+      <spring_coeff unit="LBS/FT"> 500.0 </spring_coeff>
+      <damping_coeff unit="LBS/FT/SEC"> 100.0 </damping_coeff>
+      <brake_group>0</brake_group>
+      <retractable>0</retractable>
+    </contact>
+  </ground_reactions>
+
+
+  <!-- ========================================================= -->
+  <!--  AERODYNAMICS (VALID SIMPLE JSBSim FORMAT)                -->
+  <!-- ========================================================= -->
+  <aerodynamics>
+
+    <!-- Angle-of-attack limits -->
+    <alphalimits unit="DEG">
+      <min> -15.0 </min>
+      <max>  20.0 </max>
+    </alphalimits>
+
+    <!-- LIFT axis: CL = CL_alpha * alpha (very simple) -->
+    <axis name="LIFT">
+      <function name="aero/force/Lift_alpha">
+        <description>Lift due to alpha</description>
+        <product>
+          <!-- dynamic pressure * wing area * CL_alpha * alpha -->
+          <property>aero/qbar-psf</property>
+          <property>metrics/Sw-sqft</property>
+          <property>aero/alpha-rad</property>
+          <!-- CL_alpha ≈ 5.5 per rad (~0.1/deg) -->
+          <value>5.5</value>
+        </product>
+      </function>
+      <!-- Optional: small baseline lift at zero alpha -->
+      <function name="aero/force/Lift_0">
+        <description>Lift at zero alpha</description>
+        <product>
+          <property>aero/qbar-psf</property>
+          <property>metrics/Sw-sqft</property>
+          <value>0.2</value> <!-- CL0 -->
+        </product>
+      </function>
+    </axis>
+
+    <!-- DRAG axis: CD0 + k * CL^2 -->
+    <axis name="DRAG">
+      <!-- Parasitic drag -->
+      <function name="aero/force/Drag_basic">
+        <description>Zero-lift drag</description>
+        <product>
+          <property>aero/qbar-psf</property>
+          <property>metrics/Sw-sqft</property>
+          <value>0.04</value>  <!-- CD0 -->
+        </product>
+      </function>
+
+      <!-- Induced drag -->
+      <function name="aero/force/Drag_induced">
+        <description>Induced drag ~ CL^2</description>
+        <product>
+          <property>aero/qbar-psf</property>
+          <property>metrics/Sw-sqft</property>
+          <property>aero/cl-squared</property>
+          <value>0.04</value>  <!-- k -->
+        </product>
+      </function>
+    </axis>
+
+    <!-- PITCH axis: Cm_alpha * alpha (nose-up positive) -->
+    <axis name="PITCH">
+      <function name="aero/moment/Pitch_alpha">
+        <description>Pitching moment due to alpha</description>
+        <product>
+          <property>aero/qbar-psf</property>
+          <property>metrics/Sw-sqft</property>
+          <property>metrics/cbarw-ft</property>
+          <property>aero/alpha-rad</property>
+          <value>-0.5</value> <!-- Cm_alpha: negative = statically stable -->
+        </product>
+      </function>
+
+      <!-- Pitch due to elevator (normalized command to moment) -->
+      <function name="aero/moment/Pitch_elevator">
+        <description>Pitching moment due to elevator</description>
+        <product>
+          <property>aero/qbar-psf</property>
+          <property>metrics/Sw-sqft</property>
+          <property>metrics/cbarw-ft</property>
+          <property>fcs/elevator-pos-rad</property>
+          <value>-1.0</value>  <!-- tune later -->
+        </product>
+      </function>
+    </axis>
+
+  </aerodynamics>
+
+  <!-- ========================================================= -->
+  <!--  FLIGHT CONTROLS                                           -->
+  <!-- ========================================================= -->
+  <flight_control name="fcs">
+
+    <channel name="elevator">
+      <input> fcs/elevator-cmd-norm </input>
+      <output name="elevator-pos-rad" unit="RAD">
+        <gain> 0.26 </gain> <!-- +/- 15 deg -->
+      </output>
+    </channel>
+
+    <channel name="aileron">
+      <input> fcs/aileron-cmd-norm </input>
+      <output name="aileron-pos-rad" unit="RAD">
+        <gain> 0.35 </gain> <!-- +/- 20 deg -->
+      </output>
+    </channel>
+
+    <channel name="rudder">
+      <input> fcs/rudder-cmd-norm </input>
+      <output name="rudder-pos-rad" unit="RAD">
+        <gain> 0.35 </gain> <!-- +/- 20 deg -->
+      </output>
+    </channel>
+
+    <channel name="throttle">
+      <input> fcs/throttle-cmd-norm </input>
+      <output name="throttle_act">
+        <gain> 1.0 </gain>
+      </output>
+    </channel>
+
+  </flight_control>
+
+  <!-- ========================================================= -->
+  <!--  PROPULSION (SIMPLE ELECTRIC PROP)                         -->
+  <!-- ========================================================= -->
+  <propulsion>
+    <engine name="electric_motor" type="electric">
+      <!-- You’re actually computing power & thrust in Python;
+           this just gives JSBSim *some* thrust property. -->
+      <thrust_coeff unit="LBF"> 1.0 </thrust_coeff>
+    </engine>
+  </propulsion>
+
+</FDMConfig>
