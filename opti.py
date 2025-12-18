@@ -7,8 +7,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
-from lib.artifacts import process_raw_values, run_id_utc, write_json
-from lib.exports import export_xflr5_xml_from_soln
+from lib.artifacts import process_raw_values, run_id_random, write_json
+from lib.exports import export_xflr5_xml_from_soln, export_cadquery_step
 from lib.models import apc_prop, hacker_motor_mass, hacker_motor_resistance
 
 
@@ -469,7 +469,7 @@ except Exception as e:
 report_raw = {
     "Meta": {
         # run_id is filled in once run_dir is created (near bottom of file).
-        "run_id": run_id_utc("run"),
+        "run_id": run_id_random(4, "run"),
         "timestamp_utc": datetime.now(timezone.utc).isoformat()
     },
     "Mission": {
@@ -593,20 +593,36 @@ report_raw = {
 }
 
 ### OUTPUT ARTIFACTS
-# Convert symbolic/raw Opti values into plain JSON-safe numbers/lists.
-run_dir = Path(__file__).resolve().parent / "output" / report_raw["Meta"]["run_id"]
-run_dir.mkdir(parents=True, exist_ok=False)
-
-soln = process_raw_values(report_raw, sol)
-write_json(run_dir / "soln.json", soln, indent=2)
-
-# Export an XFLR5 XML (synthesizes a single fin for the twin-fin geometry).
-try:
-    if sol is None:
-        raise RuntimeError("No solution available.")
+# Only create artifacts if simulation succeeded.
+if sol is None:
+    print("[artifacts] simulation failed, skipping artifact generation")
+else:
+    # Convert symbolic/raw Opti values into plain JSON-safe numbers/lists.
+    run_dir = Path(__file__).resolve().parent / "output" / report_raw["Meta"]["run_id"]
+    run_dir.mkdir(parents=True, exist_ok=False)
+    
+    soln = process_raw_values(report_raw, sol)
+    write_json(run_dir / "soln.json", soln, indent=2)
+    
+    # Compute solved airplane once for all exports.
     airplane_sol = sol(airplane) if callable(sol) else airplane
-    export_xflr5_xml_from_soln(airplane_sol=airplane_sol, soln=soln, out_path=run_dir / "xflr.xml")
-except Exception as e:
-    print(f"[export_xflr5_xml_from_soln] skipped due to error: {e}")
-
-print(f"[artifacts] wrote: {run_dir / 'soln.json'}")
+    
+    # Export an XFLR5 XML (synthesizes a single fin for the twin-fin geometry).
+    try:
+        export_xflr5_xml_from_soln(airplane_sol=airplane_sol, soln=soln, out_path=run_dir / "xflr.xml")
+    except Exception as e:
+        print(f"[export_xflr5_xml_from_soln] skipped due to error: {e}")
+    
+    # Export CAD as STEP file.
+    try:
+        export_cadquery_step(airplane_sol=airplane_sol, out_path=run_dir / "airplane.step")
+    except Exception as e:
+        print(f"[export_cadquery_step] skipped due to error: {e}")
+    
+    # Save AeroSandbox airplane object.
+    try:
+        airplane_sol.save(filename=str(run_dir / "airplane.aero"))
+    except Exception as e:
+        print(f"[airplane.save] skipped due to error: {e}")
+    
+    print(f"[artifacts] wrote: {run_dir / 'soln.json'}")

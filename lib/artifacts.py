@@ -1,4 +1,6 @@
 import json
+import random
+import string
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -9,6 +11,13 @@ import numpy as onp
 def run_id_utc(prefix: str = "run") -> str:
     """Returns a filesystem-safe UTC timestamped run id."""
     return datetime.now(timezone.utc).strftime(f"{prefix}_%Y%m%dT%H%M%SZ")
+
+
+def run_id_random(length: int = 4, prefix: str = "run") -> str:
+    """Returns a filesystem-safe random alphanumeric run id."""
+    chars = string.ascii_lowercase + string.digits
+    random_suffix = ''.join(random.choice(chars) for _ in range(length))
+    return f"{prefix}_{random_suffix}"
 
 
 def to_jsonable(x: Any):
