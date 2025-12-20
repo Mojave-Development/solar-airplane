@@ -39,8 +39,8 @@ tail_airfoil = asb.Airfoil("naca0010")
 polyhedral_angle = 3
 
 # Tail sizing (via Tail Volume Coefficients)
-V_H = 0.50 # Horizontal tail volume coefficient.
-V_V = 0.02 # Vertical tail volume coefficient
+V_H = 0.40 # Horizontal tail volume coefficient.
+V_V = 0.015 # Vertical tail volume coefficient
 
 # Static margin constraints (dimensionless, SM = (x_np - x_cg) / MAC)
 SM_min = 0.05
@@ -99,8 +99,8 @@ print(
 
 ### VARIABLES
 ## Performance
-airspeed = opti.variable(init_guess=10, lower_bound=5, upper_bound=15, category="airspeed")
-togw_design = opti.variable(init_guess=8, lower_bound=1, upper_bound=togw_max, category="togw_max")
+airspeed = opti.variable(init_guess=10, lower_bound=5, upper_bound=15, scale=5, category="airspeed")
+togw_design = opti.variable(init_guess=8, lower_bound=1, upper_bound=togw_max, scale=1, category="togw_max")
 power_out_max = opti.variable(init_guess=500, lower_bound=25*16, scale=100, category="power_out_max")
 
 ## Propulsion
@@ -109,15 +109,15 @@ propeller_diameter = opti.parameter(value=0.4)
 motor_kv = opti.variable(init_guess=500, lower_bound=50, upper_bound=2000, scale=100, category="motor_kv")
 
 ## Avionics
-solar_panels_n = opti.variable(init_guess=50, lower_bound=10, category="solar_panels_n", scale=10)
-battery_capacity = opti.variable(init_guess=450, lower_bound=100, category="battery_capacity", scale=100) # initial battery energy in Wh
-battery_states = opti.variable(n_vars=N, init_guess=500, category="battery_states", scale=100)
+solar_panels_n = opti.variable(init_guess=50, lower_bound=10, scale=10, category="solar_panels_n")
+battery_capacity = opti.variable(init_guess=450, lower_bound=100, scale=100, category="battery_capacity") # initial battery energy in Wh
+battery_states = opti.variable(n_vars=N, init_guess=500, scale=100, category="battery_states")
 
 ## Aerodynamics
 # Main wing
-wingspan = opti.variable(init_guess=6, lower_bound=2, upper_bound=8, category="wingspan")
+wingspan = opti.variable(init_guess=6, lower_bound=2, upper_bound=8, scale=1, category="wingspan")
 chordlen = opti.variable(init_guess=0.3, lower_bound=0.05, scale=0.1, category="chordlen")
-struct_defined_aoa = opti.variable(init_guess=2, lower_bound=0, upper_bound=10, category="struct_aoa")
+struct_defined_aoa = opti.variable(init_guess=2, lower_bound=0, upper_bound=10, scale=1, category="struct_aoa")
 cg_le_dist = 0.25 * chordlen # CG assumed at quarter-chord of main wing
 # alpha_cruise = opti.variable(init_guess=3, lower_bound=-2, upper_bound=10, scale=5, category="alpha_cruise")
 
@@ -154,7 +154,7 @@ main_wing = asb.Wing(
             airfoil=wing_airfoil,
         ),
         asb.WingXSec(  # Tip
-            xyz_le=[0.00, wingspan / 2, np.sin(10 * np.pi / 180) * 0.5 * wingspan / 2],
+            xyz_le=[0.00, wingspan / 2, np.sin(polyhedral_angle * np.pi / 180) * 0.5 * wingspan / 2],
             chord=chordlen / 2,
             twist=struct_defined_aoa,
             airfoil=wing_airfoil,
@@ -318,7 +318,7 @@ static_margin = (aero["x_np"] - cg_le_dist) / main_wing.mean_aerodynamic_chord()
 power_shaft_cruise = propulsion_propeller.propeller_shaft_power_from_thrust(
     # Guard against occasional negative drag during intermediate iterates
     # (can produce negative thrust/power and NaNs in downstream power-law models).
-    thrust_force=np.maximum(aero["D"], 1e-6) / propeller_n,
+    thrust_force=aero["D"] / propeller_n,
     area_propulsive=np.pi / 4 * propeller_diameter ** 2,
     airspeed=airspeed,
     rho=operating_atm.density(),
@@ -331,7 +331,7 @@ Q = power_shaft_cruise / (2 * np.pi * rpm_cruise / 60)
 Kt = 60 / (2 * np.pi * motor_kv) 
 i_cruise = Q / Kt
 # The resistance scaling uses max_power**(-0.68); ensure it's strictly positive to avoid NaNs.
-motor_resistance = hacker_motor_resistance(np.maximum(power_shaft_cruise, 1e-6) * 2.5, motor_kv)
+motor_resistance = hacker_motor_resistance(power_shaft_cruise * 2.5, motor_kv)
 power_cruise = (power_shaft_cruise + (i_cruise**2) * motor_resistance) / 0.95 # 95% ESC efficiency.
 
 # Propeller tip mach limit.
@@ -347,7 +347,7 @@ for i in range(N-1):
     solar_flux = solar_flux_profile[i]  # W / m^2 (numeric constant)
     solar_area = solar_panels_n * solar_panel_side_length**2 # m^2
     power_generated = solar_flux * solar_area * solar_cell_efficiency / energy_generation_margin
-    power_used = (power_cruise*propeller_n + 8)  # 8W avionics
+    power_used = (power_cruise*propeller_n + 8 + 1)  # 8W avionics, 1W for NavLights
     net_energy = (power_generated - power_used) * (dt / 3600)  # Wh
 
     battery_update = np.softmin(battery_states[i] + net_energy, battery_capacity, hardness=10)
@@ -357,8 +357,8 @@ for i in range(N-1):
 
 ### Mass
 # Power
-mass_solar_cells = 0.008 * solar_panels_n
-mass_power_board = 0.075 * 2 # 75g estimate for each power board
+mass_solar_cells = 0.0075 * solar_panels_n
+mass_power_board = 0.050 * 2 # 75g estimate for each power board
 mass_batteries = propulsion_electric.mass_battery_pack(
     battery_capacity_Wh=battery_capacity,
     battery_pack_cell_fraction=0.95
@@ -377,7 +377,8 @@ mass_gps = 0.02 # GPS module.
 mass_telemtry = 0.03 # 915Mhz telemetry module.
 mass_receiver = 0.02 # Radio receiver.
 mass_navlights = 0.01 * 4 # Four navlights.
-mass_avionics = mass_fc + mass_gps + mass_telemtry + mass_receiver + mass_power_board + mass_navlights
+mass_pitot = 0.01 # Pitot tube.
+mass_avionics = mass_fc + mass_gps + mass_telemtry + mass_receiver + mass_power_board + mass_navlights + mass_pitot
 
 # Actuators
 mass_servos = .02 * 4 # 20g a servo
@@ -390,16 +391,16 @@ mass_servos = .02 * 4 # 20g a servo
 mass_motor_raw = 0.275
 mass_motors_mounted = mass_motor_raw * 1.1 * propeller_n # marign to account for motor mounts.
 # mass_esc = propulsion_electric.mass_ESC(max_power=power_out_max)
-mass_esc = 0.030 * propeller_n # Single ESC.
+mass_escs = 0.030 * propeller_n # Single ESC.
 # mass_propellers = apc_prop(propeller_diameter)
 mass_propellers = 0.055 * propeller_n # Single propeller.
 
 # Structures
-mass_main_wing =  main_wing.area("wetted")*1.2 * 0.50 # 600g per meter squared of planform area
-mass_hstab = hor_stabilizer.area("wetted")*1.10 * 0.3 # 400g per meter squared of wetted area
-mass_vstab = (vert_stabilizer_L.area("wetted")*1.10 + vert_stabilizer_R.area("wetted")) * 0.3 # 400g per meter squared of wetted area
-mass_boom = 2 * 0.09 * boom_length  # kg (90 g/m per boom)
-mass_fuselages = 0.25 # rough estimate
+mass_main_wing =  main_wing.area("wetted")*1.2 * 0.70 # 700g per meter squared of planform area
+mass_hstab = hor_stabilizer.area("wetted")*1.10 * 0.4 # 400g per meter squared of wetted area
+mass_vstabs = (vert_stabilizer_L.area("wetted") + vert_stabilizer_R.area("wetted"))*1.10 * 0.4 # 400g per meter squared of wetted area
+mass_booms = 2 * 0.09 * boom_length  # kg (90 g/m per boom)
+mass_fuselages = 0.20 # rough estimate
 mass_superstructures = 0.2 # Two superstructures.
 mass_boom_vstab_interfaces = 0.1 # Two boom-vstab interfaces.
 mass_vstab_hstab_interfaces = 0.06 # Two vstab-stab interfaces.
@@ -410,19 +411,19 @@ total_mass = (
     mass_power_board + 
     mass_batteries + 
     mass_wires + 
-    mass_avionics +
-    mass_servos +
+    mass_avionics + 
+    mass_servos + 
     mass_motors_mounted + 
-    mass_esc + 
-    mass_propellers +
+    mass_escs + 
+    mass_propellers + 
     mass_main_wing + 
     mass_hstab + 
-    mass_vstab +
-    mass_boom +
-    mass_fuselages +
-    mass_superstructures +
-    mass_boom_vstab_interfaces +
-    mass_vstab_hstab_interfaces
+    mass_vstabs + 
+    mass_booms + 
+    mass_fuselages + 
+    mass_superstructures + 
+    mass_boom_vstab_interfaces + 
+    mass_vstab_hstab_interfaces 
 )
 
 
@@ -466,14 +467,49 @@ opti.subject_to(num_packs <= 8)
 
 
 ### SOLVE
-opti.minimize(total_mass)
+opti.minimize(wingspan)
 
 try:
     sol = opti.solve(max_iter=5000)
 except Exception as e:
     print(f"[solve] failed: {e}")
+    print("\n[DEBUG] Variable values at failure:")
+    print(f"  airspeed: {opti.debug.value(airspeed):.3f} m/s")
+    # print(f"  alpha_cruise: {opti.debug.value(alpha_cruise):.3f} deg")
+    print(f"  togw_design: {opti.debug.value(togw_design):.3f} kg")
+    print(f"  power_out_max: {opti.debug.value(power_out_max):.3f} W")
+    print(f"  solar_panels_n: {opti.debug.value(solar_panels_n):.3f}")
+    print(f"  battery_capacity: {opti.debug.value(battery_capacity):.3f} Wh")
+
+    battery_states_vals = opti.debug.value(battery_states)
+    print(f"  battery_states min: {float(onp.min(battery_states_vals)):.3f} Wh")
+    print(f"  battery_states max: {float(onp.max(battery_states_vals)):.3f} Wh")
+    print(f"  battery_states[0]: {float(battery_states_vals[0]):.3f} Wh")
+    print(f"  battery_states[-1]: {float(battery_states_vals[-1]):.3f} Wh")
+
+    print(f"  wingspan: {opti.debug.value(wingspan):.3f} m")
+    print(f"  chordlen: {opti.debug.value(chordlen):.3f} m")
+    print(f"  struct_defined_aoa: {opti.debug.value(struct_defined_aoa):.3f} deg")
+    print(f"  hstab_AR: {opti.debug.value(hstab_AR):.3f}")
+    print(f"  hstab_aoa: {opti.debug.value(hstab_aoa):.3f} deg")
+    print(f"  boom_length: {opti.debug.value(boom_length):.3f} m")
+
+    print(f"  num_packs: {opti.debug.value(num_packs):.3f}")
+    print(f"  cg_le_dist: {opti.debug.value(cg_le_dist):.3f} m")
+    print(f"  boom_y: {opti.debug.value(boom_y):.3f} m")
+    print(f"  total_mass: {opti.debug.value(total_mass):.3f} kg")
+    print(f"  static_margin: {opti.debug.value(static_margin):.3f}")
+    print(f"  L_H: {opti.debug.value(L_H):.3f} m")
+    print(f"  L_V: {opti.debug.value(L_V):.3f} m")
+    print(f"  mass_wires: {opti.debug.value(mass_wires):.3f} kg")
+    print(f"  power_cruise: {opti.debug.value(power_cruise):.3f} W")
+    print(f"  power_shaft_cruise: {opti.debug.value(power_shaft_cruise):.3f} W")
+    print(f"  aero Cm: {opti.debug.value(aero['Cm']):.6f}")
     sol = None
 
+
+
+### REPORT
 report_raw = {
     "Meta": {
         # run_id is filled in once run_dir is created (near bottom of file).
@@ -582,12 +618,12 @@ report_raw = {
         "mass_avionics": mass_avionics,
         "mass_servos": mass_servos,
         "mass_motors_mounted": mass_motors_mounted,
-        "mass_esc": mass_esc,
+        "mass_escs": mass_escs,
         "mass_propellers": mass_propellers,
         "mass_main_wing": mass_main_wing,
         "mass_hstab": mass_hstab,
-        "mass_vstab": mass_vstab,
-        "mass_boom": mass_boom,
+        "mass_vstab": mass_vstabs,
+        "mass_boom": mass_booms,
         "mass_fuselages": mass_fuselages,
         "mass_superstructures": mass_superstructures,
         "mass_boom_vstab_interfaces": mass_boom_vstab_interfaces,
@@ -630,3 +666,6 @@ else:
         print(f"[airplane.save] skipped due to error: {e}")
     
     print(f"[artifacts] wrote: {run_dir / 'soln.json'}")
+
+    # Draw airplane airplane_sol.draw()
+    airplane_sol.draw()

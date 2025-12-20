@@ -872,7 +872,7 @@ def create_threejs_viewer(
 ) -> Path:
     """Create a Three.js-based viewer HTML file. Returns the output HTML path."""
     if output_path is None:
-        output_path = soln_path.parent / "aircraft_mass_viewer.html"
+        output_path = soln_path.parent / "ghost.html"
 
     soln = json.loads(soln_path.read_text(encoding="utf-8"))
     mass_properties = json.loads(mass_properties_path.read_text(encoding="utf-8"))
