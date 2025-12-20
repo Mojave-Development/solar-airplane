@@ -1,0 +1,66 @@
+{
+  "analysis_parameters": {
+    "circular_diameter_m": 1000.0,
+    "turn_radius_m": 500.0,
+    "n_points": 3000,
+    "simulation_duration_hours": 48.0
+  },
+  "aircraft_parameters": {
+    "mission_date": 100,
+    "operating_lat": 37.398928,
+    "operating_altitude": 1200.0,
+    "airspeed": 12.118729868850002,
+    "power_cruise_all_motors": 53.0344246914333,
+    "solar_panels_n": 82,
+    "battery_capacity_Wh": 888.0000088790252,
+    "solar_panel_side_length_m": 0.125,
+    "solar_cell_efficiency": 0.2187,
+    "energy_generation_margin": 1.05,
+    "allowable_battery_depth_of_discharge": 0.85,
+    "avionics_power_W": 9.0
+  },
+  "period_statistics": {
+    "total_daytime_hours": 22.375458486162056,
+    "total_dawn_dusk_hours": 3.3931310436812274,
+    "total_nighttime_hours": 22.247415805268425,
+    "day1_daytime_hours": 11.187729243081028,
+    "day1_dawn_dusk_hours": 1.6965655218406137,
+    "day1_nighttime_hours": 11.123707902634212,
+    "day2_daytime_hours": 11.187729243081028,
+    "day2_dawn_dusk_hours": 1.6965655218406137,
+    "day2_nighttime_hours": 11.123707902634212
+  },
+  "energy_metrics": {
+    "total_energy_generated_Wh": 3969.810046797394,
+    "total_energy_used_Wh": 2979.3638268774303,
+    "energy_surplus_Wh": 990.4462199199638,
+    "energy_surplus_percent": 33.2435471957118
+  },
+  "day1_metrics": {
+    "energy_generated_Wh": 1982.9258520623139,
+    "energy_used_Wh": 1489.1851872254983,
+    "energy_surplus_Wh": 493.74066483681554,
+    "energy_surplus_percent": 33.15508837129276
+  },
+  "day2_metrics": {
+    "energy_generated_Wh": 1982.9258520623143,
+    "energy_used_Wh": 1489.185187225498,
+    "energy_surplus_Wh": 493.7406648368162,
+    "energy_surplus_percent": 33.15508837129281
+  },
+  "battery_metrics": {
+    "battery_capacity_Wh": 950.1600095005571,
+    "initial_state_Wh": 950.1600095005571,
+    "final_state_Wh": 818.24309104782,
+    "min_state_Wh": 194.0677100517561,
+    "max_state_Wh": 950.1600095005571,
+    "state_change_Wh": -131.91691845273704,
+    "battery_at_24h_Wh": 816.7603988720361
+  },
+  "power_metrics": {
+    "avg_power_generated_W": 82.75924600937698,
+    "max_power_generated_W": 247.31447926875325,
+    "avg_power_used_W": 62.070079726613145,
+    "max_power_used_W": 62.070079726613145
+  }
+}
