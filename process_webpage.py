@@ -19,13 +19,29 @@ import csv
 import html
 import io
 import json
+import math
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-import aerosandbox as asb
+try:
+    import aerosandbox as asb  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    asb = None  # type: ignore
 
-from lib.artifacts import latest_run_dir
+try:
+    from lib.artifacts import latest_run_dir  # type: ignore
+except (ModuleNotFoundError, ImportError):  # pragma: no cover
+    def latest_run_dir(output_dir_base: Path) -> Path:
+        """Fallback implementation if optional dependencies in lib/ aren't installed."""
+        if not output_dir_base.exists():
+            raise FileNotFoundError(f"Output directory not found: {output_dir_base}")
+        run_dirs = [p for p in output_dir_base.iterdir() if p.is_dir() and p.name.startswith("run_")]
+        if not run_dirs:
+            raise FileNotFoundError(f"No run directories found under: {output_dir_base}")
+        run_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return run_dirs[0]
 
 JSONDict = Dict[str, Any]
 
@@ -141,6 +157,271 @@ def load_energy_balance_csv(run_dir: Path) -> Optional[JSONDict]:
 
 
 # ----------------------------
+# XFLR5 loads (distribution TXT) -> embedded JSON
+# ----------------------------
+
+_FLOAT_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+
+def _first_float(s: str) -> Optional[float]:
+    m = _FLOAT_RE.search(s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
+
+
+def _parse_header_value(lines: List[str], key: str) -> Optional[float]:
+    """
+    Best-effort parse of scalar values from XFLR text headers.
+    Examples:
+      QInf  =   12.120000 m/s
+      Alpha =    0.000000
+      Freestream speed :  12.120 m/s
+    """
+    key_lower = key.lower()
+    for ln in lines[:60]:
+        l = ln.strip()
+        if not l:
+            continue
+        if key_lower == "qinf":
+            if l.lower().startswith("qinf"):
+                return _first_float(l)
+            if "freestream speed" in l.lower():
+                return _first_float(l)
+        elif l.lower().startswith(key_lower):
+            return _first_float(l)
+    return None
+
+
+def parse_xflr_distribution_file(txt_path: Path) -> Optional[JSONDict]:
+    """
+    Parse an XFLR5 distribution export file (per-surface station tables).
+    Returns:
+      {
+        "source_file": "...",
+        "alpha_deg": float|None,
+        "qinf_mps": float|None,
+        "surfaces": {
+          "<surface name>": [
+             {"y_span_m":..., "chord_m":..., "Cl":..., "CmGeom":..., "CmAirf_c4":..., "BM":...},
+             ...
+          ],
+        },
+      }
+    """
+    if not txt_path.exists():
+        return None
+    text = txt_path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+
+    alpha = _parse_header_value(lines, "Alpha")
+    qinf = _parse_header_value(lines, "QInf")
+
+    surfaces: Dict[str, List[JSONDict]] = {}
+
+    i = 0
+    n = len(lines)
+    while i < n - 2:
+        name_line = lines[i].rstrip("\n")
+        name = name_line.strip()
+        # Surface name lines appear unindented (e.g., "Main Wing"),
+        # followed immediately by a header line starting with "y-span".
+        if (
+            name
+            and (name_line[:1] != " ")  # unindented
+            and ("cp coefficients" not in name.lower())
+        ):
+            header = lines[i + 1].strip()
+            if ("y-span" in header) and ("Chord" in header) and ("Cl" in header) and ("BM" in header):
+                # Parse table rows until blank line
+                rows: List[JSONDict] = []
+                j = i + 2
+                while j < n:
+                    row_line = lines[j].strip()
+                    if not row_line:
+                        break
+                    parts = row_line.split()
+                    # Expect: y-span, Chord, Ai, Cl, PCd, ICd, CmGeom, CmAirf@c/4, XTrtop, XTrBot, XCP, BM
+                    if len(parts) < 12:
+                        break
+                    try:
+                        y_span = float(parts[0])
+                        chord_m = float(parts[1])
+                        cl = float(parts[3])
+                        cm_geom = float(parts[6])
+                        cm_airf = float(parts[7])
+                        bm = float(parts[11])
+                    except ValueError:
+                        break
+                    rows.append(
+                        {
+                            "y_span_m": y_span,
+                            "chord_m": chord_m,
+                            "Cl": cl,
+                            "CmGeom": cm_geom,
+                            "CmAirf_c4": cm_airf,
+                            "BM": bm,
+                        }
+                    )
+                    j += 1
+                if rows:
+                    surfaces[name] = rows
+                i = j + 1
+                continue
+        i += 1
+
+    if not surfaces:
+        return None
+
+    return {
+        "source_file": txt_path.name,
+        "alpha_deg": alpha,
+        "qinf_mps": qinf,
+        "surfaces": surfaces,
+    }
+
+
+def _to_half_span(rows: List[JSONDict], y_round_decimals: int = 4) -> List[JSONDict]:
+    """
+    Convert +/- span data to a single-sided representation by grouping on abs(y),
+    and averaging duplicate entries.
+    """
+    buckets: Dict[float, List[JSONDict]] = {}
+    for r in rows:
+        y = float(r.get("y_span_m", 0.0))
+        key = round(abs(y), y_round_decimals)
+        buckets.setdefault(key, []).append(r)
+
+    out: List[JSONDict] = []
+    for y_key, rs in buckets.items():
+        if not rs:
+            continue
+        def avg(field: str) -> float:
+            vals = [float(x.get(field, 0.0)) for x in rs]
+            return sum(vals) / len(vals) if vals else 0.0
+
+        out.append(
+            {
+                "station_y_m": float(y_key),
+                "chord_m": avg("chord_m"),
+                "Cl": avg("Cl"),
+                "CmGeom": avg("CmGeom"),
+                "CmAirf_c4": avg("CmAirf_c4"),
+                "BM": avg("BM"),
+            }
+        )
+
+    out.sort(key=lambda d: float(d.get("station_y_m", 0.0)))
+    return out
+
+
+def _compute_station_loads(
+    stations: List[JSONDict],
+    rho_kg_m3: Optional[float],
+    v_mps: Optional[float],
+) -> List[JSONDict]:
+    rho = float(rho_kg_m3) if rho_kg_m3 is not None else float("nan")
+    v = float(v_mps) if v_mps is not None else float("nan")
+    q = 0.5 * rho * v * v if (math.isfinite(rho) and math.isfinite(v)) else float("nan")
+
+    out: List[JSONDict] = []
+    for s in stations:
+        c = float(s.get("chord_m", 0.0) or 0.0)
+        cl = float(s.get("Cl", 0.0) or 0.0)
+        cmg = float(s.get("CmGeom", 0.0) or 0.0)
+        cma = float(s.get("CmAirf_c4", 0.0) or 0.0)
+
+        lprime = q * c * cl if math.isfinite(q) else float("nan")  # N/m
+        mprime_g = q * c * c * cmg if math.isfinite(q) else float("nan")  # N*m per m
+        mprime_a = q * c * c * cma if math.isfinite(q) else float("nan")  # N*m per m
+
+        out.append(
+            {
+                **s,
+                "Lprime_N_per_m": lprime,
+                "Mprime_CmGeom_Nm_per_m": mprime_g,
+                "Mprime_CmAirf_Nm_per_m": mprime_a,
+            }
+        )
+    return out
+
+
+def load_xflr_loads(run_dir: Path, soln: Mapping[str, Any]) -> Optional[JSONDict]:
+    """
+    Loads per-station distributions from XFLR export TXT files and converts to physical loads.
+    """
+    xflr_dir = run_dir / "XFLR"
+    if not xflr_dir.exists():
+        return None
+
+    # Use soln environment density if present.
+    env = soln.get("Environment", {}) or {}
+    rho = env.get("density", None)
+
+    # Prefer distribution files with the naming convention: *_a=<alpha>_v=<V>ms.txt
+    rx = re.compile(r"_a=[-+]?\d+(?:\.\d+)?_v=\d+(?:\.\d+)?ms\.txt$")
+    candidates = [p for p in xflr_dir.glob("*.txt") if rx.search(p.name)]
+    candidates.sort(key=lambda p: p.name)
+    if not candidates:
+        return None
+
+    cases: List[JSONDict] = []
+    for p in candidates:
+        parsed = parse_xflr_distribution_file(p)
+        if not parsed:
+            continue
+
+        alpha_deg = parsed.get("alpha_deg", None)
+        qinf_mps = parsed.get("qinf_mps", None)
+        if qinf_mps is None:
+            perf = soln.get("Performance", {}) or {}
+            qinf_mps = perf.get("airspeed", None)
+
+        surfaces_out: Dict[str, Any] = {}
+        for surf_name, rows in (parsed.get("surfaces", {}) or {}).items():
+            half = _to_half_span(rows)
+            with_loads = _compute_station_loads(half, rho_kg_m3=rho, v_mps=qinf_mps)
+            surfaces_out[surf_name] = {"stations": with_loads}
+
+        # Case label for UI
+        label_parts = []
+        if alpha_deg is not None:
+            label_parts.append(f"α={float(alpha_deg):.2f}°")
+        if qinf_mps is not None:
+            label_parts.append(f"V={float(qinf_mps):.2f} m/s")
+        label = " | ".join(label_parts) if label_parts else p.stem
+
+        cases.append(
+            {
+                "id": p.stem,
+                "label": label,
+                "source_file": p.name,
+                "alpha_deg": alpha_deg,
+                "qinf_mps": qinf_mps,
+                "rho_kg_m3": rho,
+                "surfaces": surfaces_out,
+            }
+        )
+
+    if not cases:
+        return None
+
+    return {
+        "cases": cases,
+        "units": {
+            "station_y_m": "m",
+            "chord_m": "m",
+            "Lprime_N_per_m": "N/m",
+            "Mprime_Nm_per_m": "N·m/m",
+            "BM": "N·m",
+        },
+    }
+
+
+# ----------------------------
 # Specs HTML
 # ----------------------------
 
@@ -165,11 +446,11 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
         "performance": [],
         "aerodynamics": [],
         "wings": [],
-        "geometry": [],
+        "geometry_structure": [],
         "mass": [],
         "power": [],
         "propulsion": [],
-        "structure": [],
+        "loads": [],
     }
 
     # Overview tab
@@ -194,6 +475,8 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
             _row("Density", _fmt(env.get("density"), ".4f", suffix=" kg/m³")),
             _row("Speed of Sound", _fmt(env.get("speed_of_sound"), ".2f", suffix=" m/s")),
         ]))
+
+    # Downloads moved to top-right overlay in the 3D view.
 
     # Performance tab
     tab_contents["performance"].append(_section("Performance", [
@@ -259,10 +542,11 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
             _row("Airfoil", _h(str(vstab.get("vstab_airfoil", "N/A")))),
         ]))
 
-    # Geometry tab
-    tab_contents["geometry"].append(_section("Geometry", [
+    # Geometry + Structure tab (merged)
+    tab_contents["geometry_structure"].append(_section("Geometry", [
         _row("Boom Length", _fmt(geom.get("boom_length"), ".3f", suffix=" m")),
         _row("Boom Y Position", _fmt(geom.get("boom_y"), ".3f", suffix=" m")),
+        _row("Boom Spacing Fraction", _fmt(geom.get("boom_spacing_frac"), ".2f")),
         _row("CG Location (from LE)", _fmt(geom.get("cg_le_dist"), ".3f", suffix=" m")),
     ]))
 
@@ -358,12 +642,66 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
         if prop_rows:
             tab_contents["propulsion"].append(_section("Propulsion", prop_rows))
 
-    # Structure tab
+    # Structure (merged into Geometry)
     if geom.get("boom_radius") is not None:
-        tab_contents["structure"].append(_section("Structural Details", [
+        tab_contents["geometry_structure"].append(_section("Structural Details", [
             _row("Boom Radius", _fmt(_num(geom.get("boom_radius")) * 1000, ".1f", suffix=" mm")),
-            _row("Boom Spacing Fraction", _fmt(geom.get("boom_spacing_frac"), ".2f")),
         ]))
+
+    # Loads tab (XFLR distributions + exports)
+    tab_contents["loads"].append(
+        "<div style='margin-top: 10px;'>"
+        "<h3 style='margin-bottom: 8px;'>XFLR Loads</h3>"
+        "<div style='display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px;'>"
+        "  <label style='display:flex; flex-direction:column; gap:4px;'>"
+        "    <span style='color:#aaa; font-size:12px;'>Case</span>"
+        "    <select id='xflrCaseSelect' style='padding:6px 8px; background:#222; color:#e0e0e0; border:1px solid #444; border-radius:6px; min-width: 220px;'></select>"
+        "  </label>"
+        "  <label style='display:flex; flex-direction:column; gap:4px;'>"
+        "    <span style='color:#aaa; font-size:12px;'>Surface</span>"
+        "    <select id='xflrSurfaceSelect' style='padding:6px 8px; background:#222; color:#e0e0e0; border:1px solid #444; border-radius:6px; min-width: 220px;'></select>"
+        "  </label>"
+        "  <div style='flex:1; min-width: 200px;'></div>"
+        "  <button id='xflrCopyCsvBtn' style='padding:8px 10px; background:#2e7d32; color:white; border:none; border-radius:6px; cursor:pointer;'>Copy CSV</button>"
+        "  <button id='xflrDownloadCsvBtn' style='padding:8px 10px; background:#1565c0; color:white; border:none; border-radius:6px; cursor:pointer;'>Download CSV</button>"
+        "</div>"
+        "<div id='xflrLoadsMessage' style='margin: 6px 0 12px 0; color:#aaa; font-size: 13px;'></div>"
+        "<div style='display: grid; grid-template-columns: 1fr; gap: 12px;'>"
+        "  <div style='position: relative; height: 220px; width: 100%; max-height: 220px; overflow: hidden; background: rgba(0,0,0,0.12); border:1px solid #333; border-radius: 8px; padding: 8px;'>"
+        "    <canvas id='xflrLiftChart' style='max-height: 200px;'></canvas>"
+        "  </div>"
+        "  <div style='position: relative; height: 220px; width: 100%; max-height: 220px; overflow: hidden; background: rgba(0,0,0,0.12); border:1px solid #333; border-radius: 8px; padding: 8px;'>"
+        "    <canvas id='xflrMomentChart' style='max-height: 200px;'></canvas>"
+        "  </div>"
+        "  <div style='position: relative; height: 220px; width: 100%; max-height: 220px; overflow: hidden; background: rgba(0,0,0,0.12); border:1px solid #333; border-radius: 8px; padding: 8px;'>"
+        "    <canvas id='xflrBendingChart' style='max-height: 200px;'></canvas>"
+        "  </div>"
+        "</div>"
+        "<div style='margin-top: 14px;'>"
+        "  <h4 style='margin: 0 0 8px 0; color:#4CAF50;'>Per-station values</h4>"
+        "  <div style='overflow-x:auto; border:1px solid #333; border-radius: 8px;'>"
+        "    <table id='xflrLoadsTable' style='width:100%; border-collapse: collapse; font-size: 12px;'>"
+        "      <thead style='background: rgba(255,255,255,0.06);'>"
+        "        <tr>"
+        "          <th style='text-align:left; padding:8px; border-bottom:1px solid #333;'>y (m)</th>"
+        "          <th style='text-align:left; padding:8px; border-bottom:1px solid #333;'>chord (m)</th>"
+        "          <th style='text-align:left; padding:8px; border-bottom:1px solid #333;'>Cl</th>"
+        "          <th style='text-align:left; padding:8px; border-bottom:1px solid #333;'>CmGeom</th>"
+        "          <th style='text-align:left; padding:8px; border-bottom:1px solid #333;'>CmAirf@c/4</th>"
+        "          <th style='text-align:left; padding:8px; border-bottom:1px solid #333;'>L' (N/m)</th>"
+        "          <th style='text-align:left; padding:8px; border-bottom:1px solid #333;'>M' CmGeom (N·m/m)</th>"
+        "          <th style='text-align:left; padding:8px; border-bottom:1px solid #333;'>M' CmAirf (N·m/m)</th>"
+        "          <th style='text-align:left; padding:8px; border-bottom:1px solid #333;'>BM</th>"
+        "        </tr>"
+        "      </thead>"
+        "      <tbody></tbody>"
+        "    </table>"
+        "  </div>"
+        "  <div style='margin-top: 10px; color:#888; font-size: 12px;'>Tip: After clicking <b>Copy CSV</b>, paste directly into Google Sheets (cell A1).</div>"
+        "  <textarea id='xflrCsvFallback' readonly style='width:100%; margin-top:10px; height:120px; background:#111; color:#ddd; border:1px solid #333; border-radius:8px; padding:8px; display:none;'></textarea>"
+        "</div>"
+        "</div>"
+    )
 
     # Build tab HTML structure
     tab_names = {
@@ -371,11 +709,11 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
         "performance": "Performance",
         "aerodynamics": "Aerodynamics",
         "wings": "Wings",
-        "geometry": "Geometry",
+        "geometry_structure": "Geometry + Structure",
         "mass": "Mass",
         "power": "Power",
         "propulsion": "Propulsion",
-        "structure": "Structure",
+        "loads": "Loads",
     }
 
     parts: List[str] = []
@@ -407,6 +745,10 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
 def extract_airplane_geometry(airplane_path: Path) -> JSONDict:
     """Extract geometry from an AeroSandbox .aero airplane file for wireframe visualization."""
     if not airplane_path.exists():
+        return {}
+
+    if asb is None:
+        print("[warning] AeroSandbox not installed; skipping airplane wireframe extraction.")
         return {}
 
     try:
@@ -461,11 +803,54 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Aircraft Mass Viewer - Three.js</title>
+  <title>AircraftView</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     body {{ font-family: Arial, sans-serif; overflow-x: hidden; overflow-y: auto; background: #1a1a1a; color: #e0e0e0; }}
+
+    #top-overlay {{
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      right: 10px;
+      z-index: 1000;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #cfcfcf;
+      font-size: 12px;
+      font-weight: 400;
+      letter-spacing: 0.1px;
+      pointer-events: none;
+    }}
+    #top-overlay .app-title {{
+      font-size: 14px;
+      padding: 4px 8px;
+      border: 1px solid #ffffff;
+      border-radius: 0px;
+      color: #ffffff;
+    }}
+    #top-overlay .left,
+    #top-overlay .right {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      pointer-events: auto;
+    }}
+    #top-overlay a {{
+      color: #cfcfcf;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      opacity: 0.9;
+    }}
+    #top-overlay a:hover {{
+      opacity: 1.0;
+    }}
+    #top-overlay .sep {{
+      opacity: 0.5;
+    }}
 
     #canvas-container {{
       width: 100vw;
@@ -596,6 +981,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="canvas-container">
+    <div id="top-overlay" aria-label="AircraftView header">
+      <div class="left"></div>
+      <div class="right" aria-label="Downloads">
+        <div class="app-title">AircraftView</div>
+        <a href="https://raw.githubusercontent.com/ezzatisawesome/solar-airplane/main/output/run_h6ue/airplane.step" target="_blank" rel="noopener">.step</a>
+        <a href="https://raw.githubusercontent.com/ezzatisawesome/solar-airplane/main/output/run_h6ue/airplane.aero" target="_blank" rel="noopener">.aero</a>
+        <a href="https://raw.githubusercontent.com/ezzatisawesome/solar-airplane/main/output/run_h6ue/aircraft.xml" target="_blank" rel="noopener">.xml</a>
+        <a href="https://raw.githubusercontent.com/ezzatisawesome/solar-airplane/main/output/run_h6ue/XFLR/aircraft.xfl" target="_blank" rel="noopener">.xfl</a>
+      </div>
+    </div>
     <div id="legend">
       <h3>Components</h3>
       <div id="legend-content"></div>
@@ -631,6 +1026,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const massProperties = {mass_properties_json};
     const airplaneGeometry = {airplane_geometry_json};
     const energyBalanceData = {energy_balance_data_json};
+    const xflrLoadsData = {xflr_loads_data_json};
 
     const batteryStates = soln.Power?.battery_states || null;
     const batteryCapacity = soln.Power?.battery_capacity || 0;
@@ -878,8 +1274,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     function addWireframe(airplaneGeometry) {{
       if (!airplaneGeometry?.wings?.length) return;
 
-      const wireframeColor = 0x808080;
-      const wireframeRadius = 0.003;
+      // Brighter + slightly thicker wireframe for readability
+      const wireframeColor = 0xdadada;
+      const wireframeRadius = 0.005;
       const xyz_ref = airplaneGeometry.xyz_ref || [0,0,0];
       const cgX = (massProperties.total || {{}}).x_cg || 0;
 
@@ -1296,6 +1693,440 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }});
     }}
 
+    // XFLR loads tab (embedded data; no fetch)
+    let xflrLoadsInitialized = false;
+    let xflrLiftChart = null;
+    let xflrMomentChart = null;
+    let xflrBendingChart = null;
+
+    function destroyChart(ch) {{
+      if (!ch) return null;
+      try {{ ch.destroy(); }} catch (e) {{}}
+      return null;
+    }}
+
+    function fmtNum(v, digits=6) {{
+      const x = Number(v);
+      if (!isFinite(x)) return '';
+      // Avoid scientific notation for common ranges while keeping precision
+      return x.toFixed(digits).replace(/\\.?0+$/, '');
+    }}
+
+    function setXflrMessage(text) {{
+      const el = document.getElementById('xflrLoadsMessage');
+      if (el) el.textContent = text || '';
+    }}
+
+    function getXflrCases() {{
+      const cases = xflrLoadsData && xflrLoadsData.cases ? xflrLoadsData.cases : [];
+      return Array.isArray(cases) ? cases : [];
+    }}
+
+    function getSelectedXflrCase() {{
+      const caseSel = document.getElementById('xflrCaseSelect');
+      const cases = getXflrCases();
+      if (!caseSel || !cases.length) return null;
+      const id = caseSel.value;
+      return cases.find(c => c.id === id) || cases[0];
+    }}
+
+    function getSelectedXflrSurface(caseObj) {{
+      const surfSel = document.getElementById('xflrSurfaceSelect');
+      if (!surfSel || !caseObj) return null;
+      const surfaces = caseObj.surfaces || {{}};
+      const keys = Object.keys(surfaces);
+      if (!keys.length) return null;
+      const name = surfSel.value;
+      return surfaces[name] ? name : keys[0];
+    }}
+
+    function populateXflrSelectors() {{
+      const caseSel = document.getElementById('xflrCaseSelect');
+      const surfSel = document.getElementById('xflrSurfaceSelect');
+      const cases = getXflrCases();
+      if (!caseSel || !surfSel) return;
+
+      caseSel.innerHTML = '';
+      for (const c of cases) {{
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.label || c.id;
+        caseSel.appendChild(opt);
+      }}
+
+      const c0 = getSelectedXflrCase();
+      surfSel.innerHTML = '';
+      if (c0 && c0.surfaces) {{
+        const names = Object.keys(c0.surfaces);
+        names.sort();
+        for (const s of names) {{
+          const opt = document.createElement('option');
+          opt.value = s;
+          opt.textContent = s;
+          surfSel.appendChild(opt);
+        }}
+      }}
+    }}
+
+    function updateXflrSurfaceOptions() {{
+      const caseObj = getSelectedXflrCase();
+      const surfSel = document.getElementById('xflrSurfaceSelect');
+      if (!surfSel) return;
+      const prev = surfSel.value;
+      surfSel.innerHTML = '';
+      if (!caseObj || !caseObj.surfaces) return;
+      const names = Object.keys(caseObj.surfaces);
+      names.sort();
+      for (const s of names) {{
+        const opt = document.createElement('option');
+        opt.value = s;
+        opt.textContent = s;
+        surfSel.appendChild(opt);
+      }}
+      if (names.includes(prev)) surfSel.value = prev;
+    }}
+
+    function buildXflrDelimited(stations, meta, includeMeta=false, delimiter=',') {{
+      const lines = [];
+      if (includeMeta) {{
+        lines.push(`# source_file: ${{meta.source_file || ''}}`);
+        if (meta.alpha_deg !== null && meta.alpha_deg !== undefined) lines.push(`# alpha_deg: ${{meta.alpha_deg}}`);
+        if (meta.qinf_mps !== null && meta.qinf_mps !== undefined) lines.push(`# qinf_mps: ${{meta.qinf_mps}}`);
+        if (meta.rho_kg_m3 !== null && meta.rho_kg_m3 !== undefined) lines.push(`# rho_kg_m3: ${{meta.rho_kg_m3}}`);
+        if (meta.surface) lines.push(`# surface: ${{meta.surface}}`);
+        lines.push(`# units: station_y_m(m), chord_m(m), Lprime(N/m), Mprime(Nm/m), BM(Nm)`);
+      }}
+
+      const header = [
+        'station_y_m',
+        'chord_m',
+        'Cl',
+        'CmGeom',
+        'CmAirf_c4',
+        'Lprime_N_per_m',
+        'Mprime_CmGeom_Nm_per_m',
+        'Mprime_CmAirf_Nm_per_m',
+        'BM'
+      ].join(delimiter);
+      lines.push(header);
+
+      for (const s of stations) {{
+        const row = [
+          fmtNum(s.station_y_m, 6),
+          fmtNum(s.chord_m, 6),
+          fmtNum(s.Cl, 6),
+          fmtNum(s.CmGeom, 6),
+          fmtNum(s.CmAirf_c4, 6),
+          fmtNum(s.Lprime_N_per_m, 6),
+          fmtNum(s.Mprime_CmGeom_Nm_per_m, 6),
+          fmtNum(s.Mprime_CmAirf_Nm_per_m, 6),
+          fmtNum(s.BM, 6),
+        ].join(delimiter);
+        lines.push(row);
+      }}
+      return lines.join('\\n');
+    }}
+
+    function buildXflrCsv(stations, meta, includeMeta=false) {{
+      return buildXflrDelimited(stations, meta, includeMeta, ',');
+    }}
+
+    function buildXflrTsv(stations, meta) {{
+      // TSV is the most reliable for copy/paste into Google Sheets / Excel
+      // (commas sometimes paste into a single column depending on locale/settings)
+      return buildXflrDelimited(stations, meta, false, '\\t');
+    }}
+
+    async function copyTextToClipboard(text) {{
+      try {{
+        await navigator.clipboard.writeText(text);
+        return true;
+      }} catch (e) {{
+        return false;
+      }}
+    }}
+
+    function fallbackShowCsv(text) {{
+      const ta = document.getElementById('xflrCsvFallback');
+      if (!ta) return;
+      ta.value = text;
+      ta.style.display = 'block';
+      ta.focus();
+      ta.select();
+      try {{ document.execCommand('copy'); }} catch (e) {{}}
+    }}
+
+    function safeFilename(s) {{
+      return String(s || 'xflr_loads').replace(/[^a-zA-Z0-9._-]+/g, '_');
+    }}
+
+    function downloadCsv(text, filename) {{
+      const blob = new Blob([text], {{ type: 'text/csv;charset=utf-8' }});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }}
+
+    function renderXflrLoads() {{
+      const caseObj = getSelectedXflrCase();
+      if (!caseObj) {{
+        setXflrMessage('No XFLR loads found in this run (missing output/<run>/XFLR/*_a=*_v=*ms.txt).');
+        return;
+      }}
+      const surfaceName = getSelectedXflrSurface(caseObj);
+      if (!surfaceName) {{
+        setXflrMessage('No surfaces found in selected case.');
+        return;
+      }}
+      const surface = (caseObj.surfaces || {{}})[surfaceName] || {{}};
+      const stations = surface.stations || [];
+      if (!stations.length) {{
+        setXflrMessage('No station data for selected surface.');
+        return;
+      }}
+
+      setXflrMessage(`Source: ${{caseObj.source_file}} | ${{caseObj.label}} | ρ=${{fmtNum(caseObj.rho_kg_m3, 4)}} kg/m³`);
+
+      // Update table
+      const tbody = document.querySelector('#xflrLoadsTable tbody');
+      if (tbody) {{
+        tbody.innerHTML = '';
+        for (const s of stations) {{
+          const tr = document.createElement('tr');
+          const cells = [
+            fmtNum(s.station_y_m, 4),
+            fmtNum(s.chord_m, 4),
+            fmtNum(s.Cl, 6),
+            fmtNum(s.CmGeom, 6),
+            fmtNum(s.CmAirf_c4, 6),
+            fmtNum(s.Lprime_N_per_m, 3),
+            fmtNum(s.Mprime_CmGeom_Nm_per_m, 3),
+            fmtNum(s.Mprime_CmAirf_Nm_per_m, 3),
+            fmtNum(s.BM, 3),
+          ];
+          for (const c of cells) {{
+            const td = document.createElement('td');
+            td.textContent = c;
+            td.style.padding = '6px 8px';
+            td.style.borderBottom = '1px solid #2a2a2a';
+            tr.appendChild(td);
+          }}
+          tbody.appendChild(tr);
+        }}
+      }}
+
+      // Charts
+      xflrLiftChart = destroyChart(xflrLiftChart);
+      xflrMomentChart = destroyChart(xflrMomentChart);
+      xflrBendingChart = destroyChart(xflrBendingChart);
+
+      const liftCanvas = document.getElementById('xflrLiftChart');
+      const momCanvas = document.getElementById('xflrMomentChart');
+      const bendCanvas = document.getElementById('xflrBendingChart');
+      if (!liftCanvas || !momCanvas || !bendCanvas) return;
+
+      const liftPoints = stations.map(s => ({{ x: s.station_y_m, y: s.Lprime_N_per_m }}));
+      const mGeomPoints = stations.map(s => ({{ x: s.station_y_m, y: s.Mprime_CmGeom_Nm_per_m }}));
+      const mAirfPoints = stations.map(s => ({{ x: s.station_y_m, y: s.Mprime_CmAirf_Nm_per_m }}));
+      const bmPoints = stations.map(s => ({{ x: s.station_y_m, y: s.BM }}));
+
+      xflrLiftChart = new Chart(liftCanvas, {{
+        type: 'line',
+        data: {{
+          datasets: [{{
+            label: "Lift per span L' (N/m)",
+            data: liftPoints,
+            borderColor: 'rgb(76, 175, 80)',
+            backgroundColor: 'rgba(76, 175, 80, 0.15)',
+            tension: 0.05,
+            pointRadius: 0
+          }}]
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          parsing: false,
+          interaction: {{ mode: 'index', intersect: false }},
+          plugins: {{
+            title: {{ display: true, text: "Lift per span", color: '#4CAF50' }},
+            legend: {{ display: true, position: 'top', labels: {{ color: '#e0e0e0' }} }}
+          }},
+          scales: {{
+            x: {{
+              type: 'linear',
+              title: {{ display: true, text: 'Station y (m)', color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ color: '#444' }}
+            }},
+            y: {{
+              title: {{ display: true, text: \"L' (N/m)\", color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ color: '#444' }}
+            }}
+          }}
+        }}
+      }});
+
+      xflrMomentChart = new Chart(momCanvas, {{
+        type: 'line',
+        data: {{
+          datasets: [
+            {{
+              label: \"Pitching moment per span M' from CmGeom (N·m/m)\",
+              data: mGeomPoints,
+              borderColor: 'rgb(33, 150, 243)',
+              backgroundColor: 'rgba(33, 150, 243, 0.10)',
+              tension: 0.05,
+              pointRadius: 0
+            }},
+            {{
+              label: \"Pitching moment per span M' from CmAirf@c/4 (N·m/m)\",
+              data: mAirfPoints,
+              borderColor: 'rgb(255, 152, 0)',
+              backgroundColor: 'rgba(255, 152, 0, 0.10)',
+              tension: 0.05,
+              pointRadius: 0
+            }}
+          ]
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          parsing: false,
+          interaction: {{ mode: 'index', intersect: false }},
+          plugins: {{
+            title: {{ display: true, text: 'Pitching moment per span', color: '#4CAF50' }},
+            legend: {{ display: true, position: 'top', labels: {{ color: '#e0e0e0' }} }}
+          }},
+          scales: {{
+            x: {{
+              type: 'linear',
+              title: {{ display: true, text: 'Station y (m)', color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ color: '#444' }}
+            }},
+            y: {{
+              title: {{ display: true, text: \"M' (N·m/m)\", color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ color: '#444' }}
+            }}
+          }}
+        }}
+      }});
+
+      xflrBendingChart = new Chart(bendCanvas, {{
+        type: 'line',
+        data: {{
+          datasets: [{{
+            label: 'Bending moment (BM)',
+            data: bmPoints,
+            borderColor: 'rgb(244, 67, 54)',
+            backgroundColor: 'rgba(244, 67, 54, 0.10)',
+            tension: 0.05,
+            pointRadius: 0
+          }}]
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          parsing: false,
+          interaction: {{ mode: 'index', intersect: false }},
+          plugins: {{
+            title: {{ display: true, text: 'Bending moment (XFLR BM column)', color: '#4CAF50' }},
+            legend: {{ display: true, position: 'top', labels: {{ color: '#e0e0e0' }} }}
+          }},
+          scales: {{
+            x: {{
+              type: 'linear',
+              title: {{ display: true, text: 'Station y (m)', color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ color: '#444' }}
+            }},
+            y: {{
+              title: {{ display: true, text: 'BM', color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ color: '#444' }}
+            }}
+          }}
+        }}
+      }});
+    }}
+
+    function initXflrLoadsTab() {{
+      if (xflrLoadsInitialized) return;
+      xflrLoadsInitialized = true;
+
+      const caseSel = document.getElementById('xflrCaseSelect');
+      const surfSel = document.getElementById('xflrSurfaceSelect');
+      const copyBtn = document.getElementById('xflrCopyCsvBtn');
+      const dlBtn = document.getElementById('xflrDownloadCsvBtn');
+
+      const cases = getXflrCases();
+      if (!cases.length) {{
+        setXflrMessage('No XFLR loads found in this run (expected output/<run>/XFLR/*_a=*_v=*ms.txt).');
+        if (caseSel) caseSel.disabled = true;
+        if (surfSel) surfSel.disabled = true;
+        if (copyBtn) copyBtn.disabled = true;
+        if (dlBtn) dlBtn.disabled = true;
+        return;
+      }}
+
+      populateXflrSelectors();
+
+      function currentStations() {{
+        const c = getSelectedXflrCase();
+        if (!c) return {{ stations: [], meta: {{}} }};
+        const sName = getSelectedXflrSurface(c);
+        const surf = sName ? (c.surfaces || {{}})[sName] : null;
+        return {{
+          stations: (surf && surf.stations) ? surf.stations : [],
+          meta: {{ ...c, surface: sName }}
+        }};
+      }}
+
+      if (caseSel) {{
+        caseSel.addEventListener('change', () => {{
+          updateXflrSurfaceOptions();
+          renderXflrLoads();
+        }});
+      }}
+      if (surfSel) {{
+        surfSel.addEventListener('change', () => {{
+          renderXflrLoads();
+        }});
+      }}
+
+      if (copyBtn) {{
+        copyBtn.addEventListener('click', async () => {{
+          const {{ stations, meta }} = currentStations();
+          const tsv = buildXflrTsv(stations, meta);
+          const ok = await copyTextToClipboard(tsv);
+          if (ok) {{
+            setXflrMessage('Copied (TSV). Paste into Google Sheets (cell A1).');
+          }} else {{
+            setXflrMessage('Clipboard blocked by browser. Data shown below—select all and copy.');
+            fallbackShowCsv(tsv);
+          }}
+        }});
+      }}
+
+      if (dlBtn) {{
+        dlBtn.addEventListener('click', () => {{
+          const {{ stations, meta }} = currentStations();
+          const csv = buildXflrCsv(stations, meta, false);
+          const fname = safeFilename(`xflr_loads_${{meta.id}}_${{meta.surface}}.csv`);
+          downloadCsv(csv, fname);
+        }});
+      }}
+
+      renderXflrLoads();
+    }}
+
     // Tab switching
     document.querySelectorAll('.tab-button').forEach(button => {{
       button.addEventListener('click', () => {{
@@ -1311,6 +2142,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           if (tabId === 'power') {{
             // allow layout to settle before Chart.js init
             setTimeout(() => initEnergyBalanceChart(), 50);
+          }}
+          if (tabId === 'loads') {{
+            // allow layout to settle before Chart.js init
+            setTimeout(() => initXflrLoadsTab(), 50);
           }}
         }}
       }});
@@ -1346,12 +2181,14 @@ def create_threejs_viewer(
         airplane_geometry = extract_airplane_geometry(airplane_path)
 
     energy_balance_data = load_energy_balance_csv(run_dir)
+    xflr_loads_data = load_xflr_loads(run_dir, soln)
 
     # Compact JSON to keep HTML size reasonable
     soln_json = json.dumps(soln, separators=(",", ":"))
     mass_properties_json = json.dumps(mass_properties, separators=(",", ":"))
     airplane_geometry_json = json.dumps(airplane_geometry, separators=(",", ":"))
     energy_balance_data_json = json.dumps(energy_balance_data, separators=(",", ":")) if energy_balance_data else "null"
+    xflr_loads_data_json = json.dumps(xflr_loads_data, separators=(",", ":")) if xflr_loads_data else "null"
 
     html_content = HTML_TEMPLATE.format(
         specs_html=specs_html,
@@ -1359,6 +2196,7 @@ def create_threejs_viewer(
         mass_properties_json=mass_properties_json,
         airplane_geometry_json=airplane_geometry_json,
         energy_balance_data_json=energy_balance_data_json,
+        xflr_loads_data_json=xflr_loads_data_json,
     )
 
     output_path.write_text(html_content, encoding="utf-8")

@@ -5,10 +5,13 @@ from aerosandbox.atmosphere import Atmosphere
 import numpy as onp
 from pathlib import Path
 from datetime import datetime, timezone
+# Workaround for some AeroSandbox installs where `aerosandbox.library.power_solar` forgets to import Atmosphere.
+power_solar.Atmosphere = Atmosphere
 
 from lib.artifacts import process_raw_values, run_id_random, write_json
 from lib.exports import export_xflr5_xml_from_soln, export_cadquery_step
 from lib.models import apc_prop, hacker_motor_mass, hacker_motor_resistance
+
 
 
 opti = asb.Opti()
@@ -467,7 +470,7 @@ opti.subject_to(num_packs <= 8)
 
 
 ### SOLVE
-opti.minimize(wingspan)
+opti.minimize(total_mass)
 
 try:
     sol = opti.solve(max_iter=5000)
@@ -649,7 +652,7 @@ else:
     
     # Export an XFLR5 XML (synthesizes a single fin for the twin-fin geometry).
     try:
-        export_xflr5_xml_from_soln(airplane_sol=airplane_sol, soln=soln, out_path=run_dir / "xflr.xml")
+        export_xflr5_xml_from_soln(airplane_sol=airplane_sol, soln=soln, out_path=run_dir / "aircraft.xml")
     except Exception as e:
         print(f"[export_xflr5_xml_from_soln] skipped due to error: {e}")
     

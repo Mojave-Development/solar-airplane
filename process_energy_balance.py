@@ -23,6 +23,16 @@ from aerosandbox.library import power_solar
 from lib.artifacts import latest_run_dir
 
 
+# Workaround for some AeroSandbox installs where `aerosandbox.library.power_solar` forgets to import Atmosphere.
+# (Seen as: NameError: name 'Atmosphere' is not defined inside power_solar.airmass()).
+try:
+    from aerosandbox.atmosphere import Atmosphere as _Atmosphere
+    power_solar.Atmosphere = _Atmosphere
+except Exception:
+    # If AeroSandbox internals change, fail gracefully; downstream call will surface a clearer error.
+    pass
+
+
 # ----------------------------
 # Data model / configuration
 # ----------------------------
