@@ -1,12 +1,11 @@
 import aerosandbox as asb
 import aerosandbox.numpy as np
 from aerosandbox.library import power_solar, propulsion_electric, propulsion_propeller
-from aerosandbox.atmosphere import Atmosphere
+from aerosandbox.atmosphere.atmosphere import Atmosphere
 import numpy as onp
 from pathlib import Path
 from datetime import datetime, timezone
 # Workaround for some AeroSandbox installs where `aerosandbox.library.power_solar` forgets to import Atmosphere.
-power_solar.Atmosphere = Atmosphere
 
 from lib.artifacts import process_raw_values, run_id_random, write_json
 from lib.exports import export_xflr5_xml_from_soln, export_cadquery_step
@@ -470,7 +469,7 @@ opti.subject_to(num_packs <= 8)
 
 
 ### SOLVE
-opti.minimize(total_mass)
+opti.minimize(wingspan)
 
 try:
     sol = opti.solve(max_iter=5000)

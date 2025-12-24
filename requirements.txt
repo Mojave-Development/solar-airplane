@@ -2,6 +2,3 @@ aerosandbox[full]
 numpy
 matplotlib
 
-# Optional: only needed if you want to export STEP CAD via AeroSandbox's CadQuery exporter
-# cadquery
-

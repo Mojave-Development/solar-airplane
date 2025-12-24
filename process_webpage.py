@@ -25,10 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-try:
-    import aerosandbox as asb  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover
-    asb = None  # type: ignore
+import aerosandbox as asb  # type: ignore
 
 try:
     from lib.artifacts import latest_run_dir  # type: ignore
@@ -53,6 +50,40 @@ JSONDict = Dict[str, Any]
 def _h(text: str) -> str:
     """HTML-escape."""
     return html.escape(text, quote=True)
+
+
+def build_top_overlay_html(run_dir: Path) -> str:
+    """Builds the top-right download overlay HTML for the viewer.
+
+    Links are generated relative to the viewer HTML file (which lives inside `run_dir`).
+    Only links to files that exist are shown.
+    """
+    candidates: List[Tuple[str, str]] = [
+        (".step", "airplane.step"),
+        (".aero", "airplane.aero"),
+        (".xml", "aircraft.xml"),
+        (".xfl", "XFLR/aircraft.xfl"),
+    ]
+
+    link_htmls: List[str] = []
+    for label, rel_path in candidates:
+        if (run_dir / rel_path).exists():
+            # `download` is best-effort; browsers may ignore it depending on context.
+            link_htmls.append(
+                f'<a href="{_h(rel_path)}" target="_blank" rel="noopener" download>{_h(label)}</a>'
+            )
+
+    links = "\n        ".join(link_htmls)
+
+    return f"""
+    <div id="top-overlay" aria-label="AircraftView header">
+      <div class="left"></div>
+      <div class="right" aria-label="Downloads">
+        <div class="app-title">AircraftView</div>
+        {links}
+      </div>
+    </div>
+""".rstrip()
 
 
 def _num(v: Any, default: float = 0.0) -> float:
@@ -446,10 +477,11 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
         "performance": [],
         "aerodynamics": [],
         "wings": [],
-        "geometry_structure": [],
+        "geometry": [],
         "mass": [],
         "power": [],
         "propulsion": [],
+        "structure": [],
         "loads": [],
     }
 
@@ -475,8 +507,6 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
             _row("Density", _fmt(env.get("density"), ".4f", suffix=" kg/m³")),
             _row("Speed of Sound", _fmt(env.get("speed_of_sound"), ".2f", suffix=" m/s")),
         ]))
-
-    # Downloads moved to top-right overlay in the 3D view.
 
     # Performance tab
     tab_contents["performance"].append(_section("Performance", [
@@ -542,11 +572,10 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
             _row("Airfoil", _h(str(vstab.get("vstab_airfoil", "N/A")))),
         ]))
 
-    # Geometry + Structure tab (merged)
-    tab_contents["geometry_structure"].append(_section("Geometry", [
+    # Geometry tab
+    tab_contents["geometry"].append(_section("Geometry", [
         _row("Boom Length", _fmt(geom.get("boom_length"), ".3f", suffix=" m")),
         _row("Boom Y Position", _fmt(geom.get("boom_y"), ".3f", suffix=" m")),
-        _row("Boom Spacing Fraction", _fmt(geom.get("boom_spacing_frac"), ".2f")),
         _row("CG Location (from LE)", _fmt(geom.get("cg_le_dist"), ".3f", suffix=" m")),
     ]))
 
@@ -642,10 +671,11 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
         if prop_rows:
             tab_contents["propulsion"].append(_section("Propulsion", prop_rows))
 
-    # Structure (merged into Geometry)
+    # Structure tab
     if geom.get("boom_radius") is not None:
-        tab_contents["geometry_structure"].append(_section("Structural Details", [
+        tab_contents["structure"].append(_section("Structural Details", [
             _row("Boom Radius", _fmt(_num(geom.get("boom_radius")) * 1000, ".1f", suffix=" mm")),
+            _row("Boom Spacing Fraction", _fmt(geom.get("boom_spacing_frac"), ".2f")),
         ]))
 
     # Loads tab (XFLR distributions + exports)
@@ -709,10 +739,11 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
         "performance": "Performance",
         "aerodynamics": "Aerodynamics",
         "wings": "Wings",
-        "geometry_structure": "Geometry + Structure",
+        "geometry": "Geometry",
         "mass": "Mass",
         "power": "Power",
         "propulsion": "Propulsion",
+        "structure": "Structure",
         "loads": "Loads",
     }
 
@@ -809,6 +840,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     body {{ font-family: Arial, sans-serif; overflow-x: hidden; overflow-y: auto; background: #1a1a1a; color: #e0e0e0; }}
 
+    #canvas-container {{
+      width: 100vw;
+      height: 60vh;
+      position: relative;
+      background: #1a1a1a;
+    }}
+
     #top-overlay {{
       position: absolute;
       top: 10px;
@@ -850,13 +888,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }}
     #top-overlay .sep {{
       opacity: 0.5;
-    }}
-
-    #canvas-container {{
-      width: 100vw;
-      height: 60vh;
-      position: relative;
-      background: #1a1a1a;
     }}
 
     #content-area {{
@@ -981,16 +1012,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="canvas-container">
-    <div id="top-overlay" aria-label="AircraftView header">
-      <div class="left"></div>
-      <div class="right" aria-label="Downloads">
-        <div class="app-title">AircraftView</div>
-        <a href="https://raw.githubusercontent.com/ezzatisawesome/solar-airplane/main/output/run_h6ue/airplane.step" target="_blank" rel="noopener">.step</a>
-        <a href="https://raw.githubusercontent.com/ezzatisawesome/solar-airplane/main/output/run_h6ue/airplane.aero" target="_blank" rel="noopener">.aero</a>
-        <a href="https://raw.githubusercontent.com/ezzatisawesome/solar-airplane/main/output/run_h6ue/aircraft.xml" target="_blank" rel="noopener">.xml</a>
-        <a href="https://raw.githubusercontent.com/ezzatisawesome/solar-airplane/main/output/run_h6ue/XFLR/aircraft.xfl" target="_blank" rel="noopener">.xfl</a>
-      </div>
-    </div>
+{top_overlay_html}
     <div id="legend">
       <h3>Components</h3>
       <div id="legend-content"></div>
@@ -1274,9 +1296,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     function addWireframe(airplaneGeometry) {{
       if (!airplaneGeometry?.wings?.length) return;
 
-      // Brighter + slightly thicker wireframe for readability
-      const wireframeColor = 0xdadada;
-      const wireframeRadius = 0.005;
+      const wireframeColor = 0x808080;
+      const wireframeRadius = 0.003;
       const xyz_ref = airplaneGeometry.xyz_ref || [0,0,0];
       const cgX = (massProperties.total || {{}}).x_cg || 0;
 
@@ -2175,6 +2196,7 @@ def create_threejs_viewer(
 
     run_dir = soln_path.parent
     specs_html = format_specs_html(soln, mass_properties)
+    top_overlay_html = build_top_overlay_html(run_dir)
 
     airplane_geometry: JSONDict = {}
     if airplane_path and airplane_path.suffix.lower() == ".aero" and airplane_path.exists():
@@ -2192,6 +2214,7 @@ def create_threejs_viewer(
 
     html_content = HTML_TEMPLATE.format(
         specs_html=specs_html,
+        top_overlay_html=top_overlay_html,
         soln_json=soln_json,
         mass_properties_json=mass_properties_json,
         airplane_geometry_json=airplane_geometry_json,
