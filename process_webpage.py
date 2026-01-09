@@ -123,13 +123,13 @@ def load_energy_balance_csv(run_dir: Path) -> Optional[JSONDict]:
     """
     Load energy balance CSV and return series data for plotting.
 
-    Expected columns (by index; matches your prior JS parsing):
-      time_hr              -> col 0
-      power_generated_W    -> col 3
-      power_used_W         -> col 4
-      battery_state_Wh     -> col 6
+    Supports header-based CSVs like:
+      time_hours, solar_flux_W_per_m2, power_generated_W, power_used_W, net_energy_Wh, battery_state_Wh
 
-    If your CSV changes, update indices or switch to header-based parsing.
+    If period_type is missing, infer it from solar flux:
+      flux == 0 -> night
+      0 < flux < 50 -> dawn_dusk
+      flux >= 50 -> day
     """
     candidates = [
         run_dir / "energy_balance_data.csv",
@@ -140,46 +140,69 @@ def load_energy_balance_csv(run_dir: Path) -> Optional[JSONDict]:
         return None
 
     text = csv_path.read_text(encoding="utf-8", errors="replace")
-    reader = csv.reader(io.StringIO(text))
+    reader = csv.DictReader(io.StringIO(text))
     rows = list(reader)
-    if len(rows) < 2:
+    if not rows:
         return None
 
+    def _get_float(row, *keys, default=None):
+        for k in keys:
+            if k in row and row[k] not in (None, ""):
+                try:
+                    return float(row[k])
+                except ValueError:
+                    pass
+        return default
+
+    def _get_str(row, *keys, default=None):
+        for k in keys:
+            if k in row and row[k] not in (None, ""):
+                return str(row[k])
+        return default
+
     time_hr: List[float] = []
+    solar_flux: List[float] = []
     period_type: List[str] = []
     p_gen: List[float] = []
     p_used: List[float] = []
     batt_Wh: List[float] = []
 
-    for r in rows[1:]:  # skip header
-        if not r or len(r) < 7:
-            continue
-        try:
-            t = float(r[0])
-            period = str(r[1]) if len(r) > 1 else "day"
-            g = float(r[3])
-            u = float(r[4])
-            b = float(r[6])
-        except (ValueError, IndexError):
+    for r in rows:
+        t = _get_float(r, "time_hr", "time_hours", "time", default=None)
+        if t is None:
             continue
 
-        time_hr.append(t)
+        flux = _get_float(r, "solar_flux_W_per_m2", "solar_flux", default=0.0) or 0.0
+        g = _get_float(r, "power_generated_W", "p_gen", "power_generated", default=None)
+        u = _get_float(r, "power_used_W", "p_used", "power_used", default=None)
+        b = _get_float(r, "battery_state_Wh", "battery_Wh", "battery_state", default=None)
+
+        if g is None or u is None or b is None:
+            continue
+
+        period = _get_str(r, "period_type", "period", default=None)
+        if period is None:
+            if flux <= 0.0:
+                period = "night"
+            elif flux < 50.0:
+                period = "dawn_dusk"
+            else:
+                period = "day"
+
+        time_hr.append(float(t))
+        solar_flux.append(float(flux))
         period_type.append(period)
-        p_gen.append(g)
-        p_used.append(u)
-        batt_Wh.append(b)
+        p_gen.append(float(g))
+        p_used.append(float(u))
+        batt_Wh.append(float(b))
 
     if not time_hr:
         return None
 
-    if csv_path.parent == run_dir:
-        source_csv = csv_path.name
-    else:
-        source_csv = f"{csv_path.parent.name}/{csv_path.name}"
-
     return {
-        "source_csv": source_csv,
+        "source_csv": str(csv_path.name),
         "time_hr": time_hr,
+        "solar_flux_W_per_m2": solar_flux,
         "period_type": period_type,
         "power_generated_W": p_gen,
         "power_used_W": p_used,
@@ -650,6 +673,81 @@ def format_specs_html(soln: Mapping[str, Any], mass_properties: Mapping[str, Any
         "<div style='position: relative; height: 300px; width: 100%; max-height: 300px; overflow: hidden;'>"
         "<canvas id='energyBalanceChart' style='max-height: 300px;'></canvas>"
         "</div>"
+        "</div>"
+    )
+
+    # Sensitivity analysis (dropdown + 48h chart for each variable)
+    tab_contents["power"].append(
+        "<div style='margin-top: 20px; padding-top: 15px; border-top: 2px solid #444;'>"
+        "<h4 style='margin-bottom: 10px; color: #4CAF50;'>Sensitivity Analysis (48h)</h4>"
+        "<div style='color:#aaa; font-size:12px; margin-bottom:10px;'>Select a delta for each variable to re-run the 48-hour energy balance in-browser (based on the embedded baseline time series).</div>"
+        "<div id='sensGrid' style='display:grid; grid-template-columns: 1fr; gap: 18px;'>"
+
+        # Weight
+        "<div style='border:1px solid #333; border-radius:10px; padding:12px; background:rgba(0,0,0,0.12);'>"
+        "  <div style='display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;'>"
+        "    <div style='font-weight:600; color:#e0e0e0;'>Weight</div>"
+        "    <select id='sensSel_weight' style='padding:6px 8px; background:#222; color:#e0e0e0; border:1px solid #444; border-radius:6px;'></select>"
+        "  </div>"
+        "  <div style='position:relative; height:320px; width:100%; margin-top:10px; overflow:hidden;'><canvas id='sensChart_weight'></canvas></div>"
+        "</div>"
+
+        # Drag
+        "<div style='border:1px solid #333; border-radius:10px; padding:12px; background:rgba(0,0,0,0.12);'>"
+        "  <div style='display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;'>"
+        "    <div style='font-weight:600; color:#e0e0e0;'>Drag</div>"
+        "    <select id='sensSel_drag' style='padding:6px 8px; background:#222; color:#e0e0e0; border:1px solid #444; border-radius:6px;'></select>"
+        "  </div>"
+        "  <div style='position:relative; height:320px; width:100%; margin-top:10px; overflow:hidden;'><canvas id='sensChart_drag'></canvas></div>"
+        "</div>"
+
+        # Solar (irradiance availability)
+        "<div style='border:1px solid #333; border-radius:10px; padding:12px; background:rgba(0,0,0,0.12);'>"
+        "  <div style='display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;'>"
+        "    <div style='font-weight:600; color:#e0e0e0;'>Solar (Irradiance)</div>"
+        "    <select id='sensSel_solar' style='padding:6px 8px; background:#222; color:#e0e0e0; border:1px solid #444; border-radius:6px;'></select>"
+        "  </div>"
+        "  <div style='position:relative; height:320px; width:100%; margin-top:10px; overflow:hidden;'><canvas id='sensChart_solar'></canvas></div>"
+        "</div>"
+
+        # Cell efficiency
+        "<div style='border:1px solid #333; border-radius:10px; padding:12px; background:rgba(0,0,0,0.12);'>"
+        "  <div style='display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;'>"
+        "    <div style='font-weight:600; color:#e0e0e0;'>Solar Cell Efficiency</div>"
+        "    <select id='sensSel_cellEff' style='padding:6px 8px; background:#222; color:#e0e0e0; border:1px solid #444; border-radius:6px;'></select>"
+        "  </div>"
+        "  <div style='position:relative; height:320px; width:100%; margin-top:10px; overflow:hidden;'><canvas id='sensChart_cellEff'></canvas></div>"
+        "</div>"
+
+        # Solar power (panel count/area proxy)
+        "<div style='border:1px solid #333; border-radius:10px; padding:12px; background:rgba(0,0,0,0.12);'>"
+        "  <div style='display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;'>"
+        "    <div style='font-weight:600; color:#e0e0e0;'>Solar Power (Panel/Area Proxy)</div>"
+        "    <select id='sensSel_solarPower' style='padding:6px 8px; background:#222; color:#e0e0e0; border:1px solid #444; border-radius:6px;'></select>"
+        "  </div>"
+        "  <div style='position:relative; height:320px; width:100%; margin-top:10px; overflow:hidden;'><canvas id='sensChart_solarPower'></canvas></div>"
+        "</div>"
+
+        # Motor efficiency
+        "<div style='border:1px solid #333; border-radius:10px; padding:12px; background:rgba(0,0,0,0.12);'>"
+        "  <div style='display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;'>"
+        "    <div style='font-weight:600; color:#e0e0e0;'>Motor Efficiency</div>"
+        "    <select id='sensSel_motorEff' style='padding:6px 8px; background:#222; color:#e0e0e0; border:1px solid #444; border-radius:6px;'></select>"
+        "  </div>"
+        "  <div style='position:relative; height:320px; width:100%; margin-top:10px; overflow:hidden;'><canvas id='sensChart_motorEff'></canvas></div>"
+        "</div>"
+
+        # CG shift
+        "<div style='border:1px solid #333; border-radius:10px; padding:12px; background:rgba(0,0,0,0.12);'>"
+        "  <div style='display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;'>"
+        "    <div style='font-weight:600; color:#e0e0e0;'>Center of Gravity Shift</div>"
+        "    <select id='sensSel_cg' style='padding:6px 8px; background:#222; color:#e0e0e0; border:1px solid #444; border-radius:6px;'></select>"
+        "  </div>"
+        "  <div style='position:relative; height:320px; width:100%; margin-top:10px; overflow:hidden;'><canvas id='sensChart_cg'></canvas></div>"
+        "  <div style='color:#888; font-size:11px; margin-top:6px;'>CG shift is modeled as an electrical power penalty proportional to |shift| (edit the coefficient in JS).</div>"
+        "</div>"
+
+        "</div>"  # sensGrid
         "</div>"
     )
 
@@ -1570,11 +1668,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         return;
       }}
 
-      const timeHours = energyBalanceData.time_hr || [];
-      const periodType = energyBalanceData.period_type || [];
-      const powerGenerated = energyBalanceData.power_generated_W || [];
-      const powerUsed = energyBalanceData.power_used_W || [];
-      const batteryState = energyBalanceData.battery_state_Wh || [];
+      // Build a *physically consistent* baseline series by re-integrating the battery energy
+      // from the power balance. The embedded CSV battery_state_Wh may include discontinuities
+      // (e.g. solver resets / saturation), which can appear as impossible charge spikes.
+      // This keeps the baseline plot consistent with the sensitivity plots (including 0%).
+      const series48 = makeVariantSeries('weight', 0);
+      const timeHours = series48.time_hr || [];
+      const periodType = series48.period_type || [];
+      const powerGenerated = series48.power_generated_W || [];
+      const powerUsed = series48.power_used_W || [];
+      const batteryState = series48.battery_state_Wh || [];
       if (!timeHours.length) return;
 
       canvas.style.height = '300px';
@@ -1713,6 +1816,470 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }}
       }});
     }}
+
+    // ----------------------------
+    // Sensitivity Analysis (48h) - in-browser recompute based on embedded baseline
+    // ----------------------------
+    const sensCharts = {{}};
+    function expandTo48h(series) {{
+      const t = series.time_hr || [];
+      if (!t.length) return series;
+
+      const tMax = Math.max(...t);
+      // If it's already ~48h, do nothing
+      if (tMax > 30) return series;
+
+      // Duplicate day 1 -> day 2 (avoid duplicating the first point)
+      const start = 1;
+      const t2 = t.slice(start).map(v => Number(v) + 24);
+
+      const dup = (arr) => (arr || []).concat((arr || []).slice(start));
+      const dupShift = (arr) => (arr || []).concat((arr || []).slice(start));
+
+      return {{
+        time_hr: t.concat(t2),
+        period_type: dupShift(series.period_type),
+        solar_flux_W_per_m2: dup(series.solar_flux_W_per_m2),
+        power_generated_W: dup(series.power_generated_W),
+        power_used_W: dup(series.power_used_W),
+        battery_state_Wh: dup(series.battery_state_Wh),
+      }};
+    }}
+
+    
+    function destroyIfExists(id) {{
+      if (sensCharts[id]) {{
+        try {{ sensCharts[id].destroy(); }} catch (e) {{}}
+        delete sensCharts[id];
+      }}
+    }}
+
+    function clamp(x, lo, hi) {{ return Math.max(lo, Math.min(hi, x)); }}
+
+    function estimateBatteryPowerLimits(timeHours, Eseries) {{
+      // Estimate effective charge/discharge power limits from a baseline energy trace.
+      // Uses finite differences dE/dt (Wh/hr == W) and returns conservative (95th percentile) limits.
+      if (!timeHours || !Eseries || timeHours.length < 3 || Eseries.length !== timeHours.length) {{
+        return {{ maxChargeW: Infinity, maxDischargeW: Infinity }};
+      }}
+      const rates = [];
+      for (let i = 0; i < timeHours.length - 1; i++) {{
+        const t0 = Number(timeHours[i]);
+        const t1 = Number(timeHours[i + 1]);
+        const dt = t1 - t0;
+        if (!(dt > 1e-9)) continue;
+        const e0 = Number(Eseries[i]);
+        const e1 = Number(Eseries[i + 1]);
+        if (!isFinite(e0) || !isFinite(e1)) continue;
+        rates.push((e1 - e0) / dt); // W
+      }}
+      if (!rates.length) return {{ maxChargeW: Infinity, maxDischargeW: Infinity }};
+      const pos = rates.filter(r => isFinite(r) && r > 0).sort((a,b)=>a-b);
+      const neg = rates.filter(r => isFinite(r) && r < 0).map(r => -r).sort((a,b)=>a-b); // magnitudes
+      const q = (arr, p) => {{
+        if (!arr.length) return Infinity;
+        const idx = Math.min(arr.length - 1, Math.max(0, Math.floor(p * (arr.length - 1))));
+        return arr[idx];
+      }};
+      // 95th percentile to avoid one-off numerical artifacts
+      const maxChargeW = q(pos, 0.95);
+      const maxDischargeW = q(neg, 0.95);
+      return {{
+        maxChargeW: (isFinite(maxChargeW) && maxChargeW > 0) ? maxChargeW : Infinity,
+        maxDischargeW: (isFinite(maxDischargeW) && maxDischargeW > 0) ? maxDischargeW : Infinity
+      }};
+    }}
+
+    function integrateBattery(timeHours, pGen, pUse, E0, capWh, limits) {{
+      // Robust integration of battery energy (Wh) from power balance (W).
+      // - trapezoidal rule (reduces stair-step artifacts)
+      // - optional charge/discharge power limits (inferred from baseline curve)
+      // - efficiency + saturation behavior without "energy injection" spikes
+      const n = (timeHours || []).length;
+      const E = new Array(n).fill(0);
+      if (n === 0) return E;
+
+      const etaCharge = 0.98;     // simple lumped charge efficiency
+      const etaDischarge = 0.98;  // lumped discharge efficiency
+      const maxChargeW = (limits && isFinite(limits.maxChargeW)) ? limits.maxChargeW : Infinity;
+      const maxDischargeW = (limits && isFinite(limits.maxDischargeW)) ? limits.maxDischargeW : Infinity;
+
+      E[0] = clamp(Number(E0) || 0, 0, capWh);
+
+      const netAt = (i) => {{
+        const g = Number(pGen[i]) || 0;
+        const u = Number(pUse[i]) || 0;
+        let net = g - u; // +charges battery, -discharges battery
+        // Apply power limits (pre-efficiency)
+        net = clamp(net, -maxDischargeW, maxChargeW);
+        return net;
+      }};
+
+      for (let i = 0; i < n - 1; i++) {{
+        const t0 = Number(timeHours[i]);
+        const t1 = Number(timeHours[i + 1]);
+        let dt = t1 - t0; // hours
+        if (!(dt > 0)) {{
+          E[i + 1] = E[i];
+          continue;
+        }}
+
+        let net0 = netAt(i);
+        let net1 = netAt(i + 1);
+        // Trapezoid average power
+        let netAvg = 0.5 * (net0 + net1);
+
+        // Efficiency: charging stores less than electrical surplus; discharging removes more than load deficit.
+        if (netAvg >= 0) {{
+          netAvg = netAvg * etaCharge;
+        }} else {{
+          netAvg = netAvg / etaDischarge;
+        }}
+
+        // Enforce saturation *continuously* (don't allow a single step to "teleport" past cap)
+        let next = E[i] + netAvg * dt;
+
+        if (next > capWh) {{
+          // If we're at/near full, surplus should be curtailed (no additional stored energy)
+          next = capWh;
+        }} else if (next < 0) {{
+          next = 0;
+        }}
+
+        E[i + 1] = next;
+      }}
+      return E;
+    }}
+
+
+    // Builds a chart visually consistent with your existing energy balance plot,
+    // plus an optional Solar Flux dataset on a third axis (to match your "bottom of page" 48h style).
+    function buildEnergyBalanceChart(canvasId, series, titleText) {{
+      const ZERO_PAD_WH = 20;   // ensures space past 0 Wh
+      const ZERO_PAD_W  = 30;   // ensures space past 0 W
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return null;
+
+      const timeHours = series.time_hr || [];
+      const periodType = series.period_type || [];
+      const powerGenerated = series.power_generated_W || [];
+      const powerUsed = series.power_used_W || [];
+      const batteryState = series.battery_state_Wh || [];
+      const solarFlux = series.solar_flux_W_per_m2 || [];
+
+      if (!timeHours.length) return null;
+
+      // Axis ranges (same approach as initEnergyBalanceChart)
+      const validBatteryState = batteryState.filter(v => !isNaN(v) && isFinite(v));
+      const battMin = validBatteryState.length > 0 ? Math.min(...validBatteryState) : 0;
+      const battMax = validBatteryState.length > 0 ? Math.max(...validBatteryState) : 100;
+      const battRange = battMax - battMin;
+      const battPadding = Math.max(battRange * 0.15, ZERO_PAD_WH);
+      const battYMin = Math.min(0 - ZERO_PAD_WH, battMin - battPadding);
+      const battYMax = battMax + battPadding;
+
+
+      const allPowerValues = [...powerGenerated, ...powerUsed].filter(v => !isNaN(v) && isFinite(v));
+      const powerMin = allPowerValues.length > 0 ? Math.min(...allPowerValues) : 0;
+      const powerMax = allPowerValues.length > 0 ? Math.max(...allPowerValues) : 100;
+      const powerRange = powerMax - powerMin;
+      const powerPadding = Math.max(powerRange * 0.15, ZERO_PAD_W);
+      const powerYMin = Math.min(0 - ZERO_PAD_W, powerMin - powerPadding);
+      const powerYMax = powerMax + powerPadding;
+
+
+      const fullYMin = Math.min(battYMin, powerYMin);
+      const fullYMax = Math.max(battYMax, powerYMax);
+
+      const createPeriodBackground = (periodName, color) => {{
+        const data = timeHours.map((t, i) => {{
+          const period = periodType[i] || 'day';
+          return (period === periodName || (periodName === 'dawn_dusk' && (period === 'dawn_dusk' || period === 'dusk')))
+            ? fullYMax
+            : fullYMin;
+        }});
+        return {{
+          label: periodName === 'dawn_dusk' ? 'Dawn/Dusk' : periodName.charAt(0).toUpperCase() + periodName.slice(1),
+          data,
+          backgroundColor: color,
+          borderColor: 'transparent',
+          borderWidth: 0,
+          fill: {{ value: fullYMin }},
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          order: -1,
+          yAxisID: 'y',
+          tension: 0
+        }};
+      }};
+
+      const backgroundDatasets = [];
+      if (periodType.length > 0) {{
+        backgroundDatasets.push(createPeriodBackground('night', 'rgba(0, 0, 128, 0.20)'));
+        backgroundDatasets.push(createPeriodBackground('dawn_dusk', 'rgba(255, 165, 0, 0.18)'));
+        backgroundDatasets.push(createPeriodBackground('day', 'rgba(255, 250, 205, 0.15)'));
+      }}
+
+      return new Chart(canvas, {{
+        type: 'line',
+        data: {{
+          labels: timeHours.map(t => Number(t).toFixed(2)),
+          datasets: [
+            ...backgroundDatasets,
+            {{
+              label: 'Power Generated (W)',
+              data: powerGenerated,
+              borderColor: 'rgb(76, 175, 80)',
+              backgroundColor: 'rgba(76, 175, 80, 0.2)',
+              yAxisID: 'y1',
+              tension: 0.1,
+              pointRadius: 0
+            }},
+            {{
+              label: 'Power Used (W)',
+              data: powerUsed,
+              borderColor: 'rgb(244, 67, 54)',
+              backgroundColor: 'rgba(244, 67, 54, 0.2)',
+              yAxisID: 'y1',
+              tension: 0.1,
+              pointRadius: 0
+            }},
+            {{
+              label: 'Battery Energy (Wh)',
+              data: batteryState,
+              borderColor: 'rgb(33, 150, 243)',
+              backgroundColor: 'rgba(33, 150, 243, 0.2)',
+              yAxisID: 'y',
+              tension: 0.1,
+              pointRadius: 0
+            }},
+            // Solar flux (optional) to match your 48h "bottom of page" style
+            ...(solarFlux && solarFlux.length ? [{{
+              label: 'Solar Flux (W/m²)',
+              data: solarFlux,
+              borderColor: 'rgb(255, 152, 0)',
+              backgroundColor: 'rgba(255, 152, 0, 0.0)',
+              yAxisID: 'y2',
+              tension: 0.1,
+              pointRadius: 0,
+              borderDash: [6, 4]
+            }}] : [])
+          ]
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {{ mode: 'index', intersect: false }},
+          plugins: {{
+            title: {{ display: true, text: titleText, color: '#4CAF50' }},
+            legend: {{ display: true, position: 'top', labels: {{ color: '#e0e0e0' }} }}
+          }},
+          scales: {{
+            x: {{
+              display: true,
+              title: {{ display: true, text: 'Time (hours)', color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ color: '#444' }}
+            }},
+            y: {{
+              type: 'linear',
+              display: true,
+              position: 'left',
+              title: {{ display: true, text: 'Battery Energy (Wh)', color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ color: '#444' }},
+              min: battYMin,
+              max: battYMax
+            }},
+            y1: {{
+              type: 'linear',
+              display: true,
+              position: 'right',
+              title: {{ display: true, text: 'Power (W)', color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ drawOnChartArea: false, color: '#444' }},
+              min: powerYMin,
+              max: powerYMax
+            }},
+            y2: {{
+              type: 'linear',
+              display: true,
+              position: 'right',
+              offset: true,
+              title: {{ display: true, text: 'Solar Flux (W/m²)', color: '#e0e0e0' }},
+              ticks: {{ color: '#aaa' }},
+              grid: {{ drawOnChartArea: false, color: '#444' }}
+            }}
+          }}
+        }}
+      }});
+    }}
+
+    // Map dropdown setting -> modified series
+    function makeVariantSeries(kind, selectionValue) {{
+      // Baseline
+      const base = expandTo48h(energyBalanceData);
+      const timeHours = base.time_hr || [];
+      const periodType = base.period_type || [];
+      const solarFlux = base.solar_flux_W_per_m2 || [];
+      const pGen0 = base.power_generated_W || [];
+      const pUse0 = base.power_used_W || [];
+      const E0_series = base.battery_state_Wh || [];
+
+      const batteryCapacity = (soln && soln.Power && soln.Power.battery_capacity) ? Number(soln.Power.battery_capacity) : null;
+      const E0 = E0_series.length ? Number(E0_series[0]) : (batteryCapacity || 0);
+
+      // Parse selection
+      // For percent dropdowns: -0.2, -0.1, 0, 0.1, 0.2
+      // For cg: centimeters integer, e.g. -40 .. +20
+      let pGen = pGen0.slice();
+      let pUse = pUse0.slice();
+
+      if (kind === 'weight' || kind === 'drag') {{
+        const delta = Number(selectionValue) || 0;
+        pUse = pUse0.map(v => (Number(v) || 0) * (1 + delta));
+      }}
+
+      if (kind === 'solar' || kind === 'cellEff' || kind === 'solarPower') {{
+        const delta = Number(selectionValue) || 0;
+        pGen = pGen0.map(v => (Number(v) || 0) * (1 + delta));
+      }}
+
+      if (kind === 'motorEff') {{
+        // Efficiency up => electrical power down. Use reciprocal scaling.
+        const delta = Number(selectionValue) || 0;
+        const scale = 1 / Math.max(0.2, (1 + delta)); // prevent divide-by-near-zero
+        pUse = pUse0.map(v => (Number(v) || 0) * scale);
+      }}
+
+      if (kind === 'cg') {{
+        const shift_cm = Number(selectionValue) || 0;
+        // Edit this coefficient to match your trim/drag model:
+        const penalty_per_cm = 0.002; // 0.2% electrical power per cm of |shift|
+        const scale = 1 + penalty_per_cm * Math.abs(shift_cm);
+        pUse = pUse0.map(v => (Number(v) || 0) * scale);
+      }}
+
+      const cap = batteryCapacity || Math.max(...(E0_series.length ? E0_series : [0]));
+
+      // Always (re-)integrate battery energy from the power balance, even at 0% delta.
+      // The embedded CSV battery_state_Wh can contain discontinuities (e.g. solver resets / saturation),
+      // which show up as impossible "teleport" charging spikes. Re-integration yields the smooth,
+      // rate-limited curve used for non-zero sensitivity values.
+      const limits = estimateBatteryPowerLimits(timeHours, E0_series);
+
+      const batt = integrateBattery(timeHours, pGen, pUse, E0, cap, limits);
+
+      return {{
+        time_hr: timeHours,
+        period_type: periodType,
+        solar_flux_W_per_m2: solarFlux,
+        power_generated_W: pGen,
+        power_used_W: pUse,
+        battery_state_Wh: batt
+      }};
+    }}
+
+    function fillPercentSelect(selId) {{
+      const sel = document.getElementById(selId);
+      if (!sel) return;
+      sel.innerHTML = '';
+      const opts = [
+        {{ label: '-20%', v: -0.2 }},
+        {{ label: '-10%', v: -0.1 }},
+        {{ label: '0%', v: 0.0 }},
+        {{ label: '+10%', v: 0.1 }},
+        {{ label: '+20%', v: 0.2 }}
+      ];
+      for (const o of opts) {{
+        const el = document.createElement('option');
+        el.value = String(o.v);
+        el.textContent = o.label;
+        if (o.v === 0) el.selected = true;
+        sel.appendChild(el);
+      }}
+    }}
+
+    function fillCgSelect(selId) {{
+      const sel = document.getElementById(selId);
+      if (!sel) return;
+      sel.innerHTML = '';
+      for (let cm = -40; cm <= 20; cm += 5) {{
+        const el = document.createElement('option');
+        el.value = String(cm);
+        el.textContent = `${{cm}} cm`;
+        if (cm === 0) el.selected = true;
+        sel.appendChild(el);
+      }}
+    }}
+
+    function initSensitivityCharts() {{
+      // Only run if power tab is active (same guard style as initEnergyBalanceChart)
+      const powerTab = document.getElementById('tab-power');
+      if (!powerTab || !powerTab.classList.contains('active')) return;
+
+      if (!energyBalanceData) return;
+
+      // Populate selects once
+      fillPercentSelect('sensSel_weight');
+      fillPercentSelect('sensSel_drag');
+      fillPercentSelect('sensSel_solar');
+      fillPercentSelect('sensSel_cellEff');
+      fillPercentSelect('sensSel_solarPower');
+      fillPercentSelect('sensSel_motorEff');
+      fillCgSelect('sensSel_cg');
+
+      const defs = [
+        {{ kind: 'weight', sel: 'sensSel_weight', canvas: 'sensChart_weight', title: 'Sensitivity: Weight' }},
+        {{ kind: 'drag', sel: 'sensSel_drag', canvas: 'sensChart_drag', title: 'Sensitivity: Drag' }},
+        {{ kind: 'solar', sel: 'sensSel_solar', canvas: 'sensChart_solar', title: 'Sensitivity: Solar (Irradiance)' }},
+        {{ kind: 'cellEff', sel: 'sensSel_cellEff', canvas: 'sensChart_cellEff', title: 'Sensitivity: Solar Cell Efficiency' }},
+        {{ kind: 'solarPower', sel: 'sensSel_solarPower', canvas: 'sensChart_solarPower', title: 'Sensitivity: Solar Power (Panel/Area Proxy)' }},
+        {{ kind: 'motorEff', sel: 'sensSel_motorEff', canvas: 'sensChart_motorEff', title: 'Sensitivity: Motor Efficiency' }},
+        {{ kind: 'cg', sel: 'sensSel_cg', canvas: 'sensChart_cg', title: 'Sensitivity: CG Shift' }}
+      ];
+
+      function renderOne(d) {{
+        const sel = document.getElementById(d.sel);
+        const v = sel ? sel.value : '0';
+
+        const series = makeVariantSeries(d.kind, v);
+
+        // If chart exists, update it in-place
+        const ch = sensCharts[d.canvas];
+        if (ch) {{
+          ch.data.labels = series.time_hr.map(t => Number(t).toFixed(2));
+
+          // Datasets order in buildEnergyBalanceChart:
+          // ...background, Power Gen, Power Used, Battery, Solar Flux (optional)
+          // Update by label to be safe:
+          for (const ds of ch.data.datasets) {{
+            if (ds.label === 'Power Generated (W)') ds.data = series.power_generated_W;
+            if (ds.label === 'Power Used (W)') ds.data = series.power_used_W;
+            if (ds.label === 'Battery Energy (Wh)') ds.data = series.battery_state_Wh;
+            if (ds.label === 'Solar Flux (W/m²)') ds.data = series.solar_flux_W_per_m2;
+          }}
+
+          ch.update();
+          return;
+        }}
+
+        // Otherwise create it once
+        sensCharts[d.canvas] = buildEnergyBalanceChart(d.canvas, series, d.title);
+      }}
+
+
+      // Initial render
+      for (const d of defs) renderOne(d);
+
+      // Re-render on change
+      for (const d of defs) {{
+        const sel = document.getElementById(d.sel);
+        if (!sel) continue;
+        sel.addEventListener('change', () => renderOne(d));
+      }}
+    }}
+
 
     // XFLR loads tab (embedded data; no fetch)
     let xflrLoadsInitialized = false;
@@ -2162,7 +2729,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           tabContent.classList.add('active');
           if (tabId === 'power') {{
             // allow layout to settle before Chart.js init
-            setTimeout(() => initEnergyBalanceChart(), 50);
+            setTimeout(() => {{
+              initEnergyBalanceChart();
+              initSensitivityCharts();
+            }}, 50);
           }}
           if (tabId === 'loads') {{
             // allow layout to settle before Chart.js init
